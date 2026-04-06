@@ -295,6 +295,8 @@ cc_result File_Read(cc_file file, void* data, cc_uint32 count, cc_uint32* bytesR
 cc_result File_Write(cc_file file, const void* data, cc_uint32 count, cc_uint32* bytesWrote);
 /* Attempts to close the given file. */
 cc_result File_Close(cc_file file);
+/* Attempts to delete the file at the given path. */
+cc_result File_Delete(const cc_filepath* path);
 /* Attempts to seek to a position in the given file. */
 cc_result File_Seek(cc_file file, int offset, int seekType);
 /* Attempts to get the current position in the given file. */

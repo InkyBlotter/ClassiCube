@@ -1,5 +1,6 @@
 #include "Commands.h"
 #include "Chat.h"
+#include "Lighting.h"
 #include "String_.h"
 #include "Event.h"
 #include "Game.h"
@@ -793,6 +794,130 @@ static struct ChatCommand BlockEditCommand = {
 };
 
 
+static void SunAngleCommand_Execute(const cc_string* args, int argsCount) {
+	int dir;
+	if (Lighting_Mode == LIGHTING_MODE_ANGLED) {
+		int cur;
+		if (!argsCount) {
+			cur = FancyLighting_GetSunDir();
+			Chat_Add1("&e/client sunangle: &fCurrent direction is %i (0=NE, 1=NW, 2=SW, 3=SE).", &cur);
+			return;
+		}
+		if (!Convert_ParseInt(args, &dir) || dir < 0 || dir > 3) {
+			Chat_AddRaw("&e/client sunangle: &cDirection must be 0, 1, 2, or 3 for Angled Fancy."); return;
+		}
+		FancyLighting_SetSunDir(dir);
+		Chat_Add1("&e/client sunangle: &fSun direction set to %i.", &dir);
+	} else if (Lighting_Mode == LIGHTING_MODE_SMOOTH_ANGLED) {
+		if (!argsCount) {
+			float cur = FancyLighting_GetSmoothAngle();
+			Chat_Add1("&e/client sunangle: &fCurrent shadow angle is %f1 degrees.", &cur);
+			return;
+		}
+		if (!Convert_ParseInt(args, &dir) || dir < 0 || dir > 359) {
+			Chat_AddRaw("&e/client sunangle: &cAngle must be 0-359 degrees for Fancier Angled."); return;
+		}
+		FancyLighting_SetSmoothAngle((float)dir);
+		Chat_Add1("&e/client sunangle: &fShadow angle set to %i degrees.", &dir);
+	} else {
+		Chat_AddRaw("&e/client sunangle: &cOnly works in Angled Fancy or Fancier Angled lighting mode.");
+	}
+}
+
+static struct ChatCommand SunAngleCommand = {
+	"SunAngle", SunAngleCommand_Execute,
+	0,
+	{
+		"&a/client sunangle [value]",
+		"&eAngled Fancy: value is 0-3 (0=NE, 1=NW, 2=SW, 3=SE).",
+		"&eFancier Angled: value is 0-359 degrees (0=North, 90=East).",
+	}
+};
+
+static void SunElevationCommand_Execute(const cc_string* args, int argsCount) {
+	int elev;
+	if (Lighting_Mode != LIGHTING_MODE_SMOOTH_ANGLED) {
+		Chat_AddRaw("&e/client sunelevation: &cOnly works in Fancier Angled lighting mode."); return;
+	}
+	if (!argsCount) {
+		float cur = FancyLighting_GetSmoothElevation();
+		Chat_Add1("&e/client sunelevation: &fCurrent elevation is %f1 degrees.", &cur);
+		return;
+	}
+	if (!Convert_ParseInt(args, &elev) || elev < 1 || elev > 89) {
+		Chat_AddRaw("&e/client sunelevation: &cElevation must be 1-89 degrees."); return;
+	}
+	FancyLighting_SetSmoothElevation((float)elev);
+	Chat_Add1("&e/client sunelevation: &fSun elevation set to %i degrees.", &elev);
+}
+
+static struct ChatCommand SunElevationCommand = {
+	"SunElevation", SunElevationCommand_Execute,
+	0,
+	{
+		"&a/client sunelevation [1-89]",
+		"&eSets the sun elevation above the horizon in degrees.",
+		"&eRequires Fancier Angled lighting mode.",
+	}
+};
+
+static void SunCycleCommand_Execute(const cc_string* args, int argsCount) {
+	cc_bool enabled;
+	if (Lighting_Mode != LIGHTING_MODE_ANGLED) {
+		Chat_AddRaw("&e/client suncycle: &cOnly works in Fancy Angled lighting mode."); return;
+	}
+	if (!argsCount) {
+		enabled = FancyLighting_GetSunCycle();
+		Chat_AddRaw(enabled ? "&e/client suncycle: &fSun cycling is currently &aon&f." :
+		                      "&e/client suncycle: &fSun cycling is currently &coff&f.");
+		return;
+	}
+	if (!Convert_ParseBool(args, &enabled)) {
+		Chat_AddRaw("&e/client suncycle: &cMust be true or false."); return;
+	}
+	FancyLighting_SetSunCycle(enabled);
+	Chat_AddRaw(enabled ? "&e/client suncycle: &fSun cycling turned &aon&f." :
+	                      "&e/client suncycle: &fSun cycling turned &coff&f.");
+}
+
+static struct ChatCommand SunCycleCommand = {
+	"SunCycle", SunCycleCommand_Execute,
+	0,
+	{
+		"&a/client suncycle [on/off]",
+		"&eToggles automatic 4-step sun direction cycling.",
+		"&eRequires Fancy Angled lighting mode.",
+	}
+};
+
+static void SunCycleSpeedCommand_Execute(const cc_string* args, int argsCount) {
+	int spd;
+	if (Lighting_Mode != LIGHTING_MODE_SMOOTH_ANGLED) {
+		Chat_AddRaw("&e/client suncyclespeed: &cOnly works in Fancier Angled lighting mode."); return;
+	}
+	if (!argsCount) {
+		float cur = FancyLighting_GetSmoothCycleSpeed();
+		Chat_Add1("&e/client suncyclespeed: &fCurrent speed is %f1 degrees/sec.", &cur);
+		return;
+	}
+	if (!Convert_ParseInt(args, &spd) || spd < 0 || spd > 360) {
+		Chat_AddRaw("&e/client suncyclespeed: &cSpeed must be 0-360 degrees/sec."); return;
+	}
+	FancyLighting_SetSmoothCycleSpeed((float)spd);
+	Chat_Add1("&e/client suncyclespeed: &fCycle speed set to %i degrees/sec (0 = disabled).", &spd);
+}
+
+static struct ChatCommand SunCycleSpeedCommand = {
+	"SunCycleSpeed", SunCycleSpeedCommand_Execute,
+	0,
+	{
+		"&a/client suncyclespeed [0-360]",
+		"&eSets the sun rotation speed in degrees per second.",
+		"&eSet to 0 to disable cycling. Requires Fancier Angled lighting.",
+	}
+};
+
+
 /*########################################################################################################################*
 *------------------------------------------------------Commands component-------------------------------------------------*
 *#########################################################################################################################*/
@@ -810,6 +935,10 @@ static void OnInit(void) {
 	Commands_Register(&BlockEditCommand);
 	Commands_Register(&CuboidCommand);
 	Commands_Register(&ReplaceCommand);
+	Commands_Register(&SunAngleCommand);
+	Commands_Register(&SunElevationCommand);
+	Commands_Register(&SunCycleCommand);
+	Commands_Register(&SunCycleSpeedCommand);
 }
 
 static void OnFree(void) {

@@ -176,6 +176,8 @@ static cc_result File_Do(cc_file* file, const char* path, int mode) {
 	return *file == -1 ? errno : 0;
 }
 
+cc_result File_Delete(const cc_filepath* path) { return unlink(path->buffer) == 0 ? 0 : errno; }
+
 cc_result File_Open(cc_file* file, const cc_filepath* path) {
 	return File_Do(file, path->buffer, O_RDONLY);
 }

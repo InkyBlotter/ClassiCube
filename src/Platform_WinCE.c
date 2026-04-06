@@ -317,6 +317,10 @@ static cc_result DoFile(cc_file* file, const cc_filepath* path, DWORD access, DW
 	return *file != INVALID_HANDLE_VALUE ? 0 : GetLastError();
 }
 
+cc_result File_Delete(const cc_filepath* path) {
+	return DeleteFileW(path->uni) ? 0 : GetLastError();
+}
+
 cc_result File_Open(cc_file* file, const cc_filepath* path) {
 	return DoFile(file, path, GENERIC_READ, OPEN_EXISTING);
 }

@@ -87,6 +87,12 @@ Copyright 2014-2025 ClassiCube | Licensed under BSD-3
 #define OPT_INV_SCROLLBAR_SCALE "inv-scrollbar-scale"
 #define OPT_ANAGLYPH3D "anaglyph-3d"
 
+#define OPT_SUN_DIR   "gfx-sundir"
+#define OPT_SUN_CYCLE "gfx-suncycle"
+#define OPT_SMOOTH_ANGLE     "gfx-smoothangle"
+#define OPT_SMOOTH_ELEV      "gfx-smoothelev"
+#define OPT_SMOOTH_CYCLE_SPD "gfx-smoothcyclespd"
+
 #define Option_GetOffsetX(defValue) Options_GetInt("offset-x", 0, 1000, defValue);
 #define Option_GetOffsetY(defValue) Options_GetInt("offset-y", 0, 1000, defValue);
 

@@ -564,8 +564,40 @@ static void Render3DFrame(float delta, float t) {
 		SelOutlineRenderer_Render(&Game_SelectedPos, true);
 	}
 
-	/* Render water over translucent blocks when under the water outside the map for proper alpha blending */
+	/* Render water reflection pass before drawing water.
+	   Scan downward from the camera to find the actual water surface
+	   so the FBO is captured from the correct reflected camera height. */
+	{
+		struct Matrix refl_mvp;
+		Vec3 camPos = Camera.CurrentPos;
+		float waterY = (float)Env.EdgeHeight; /* default to map edge water */
+		int cx = (int)camPos.x, cz = (int)camPos.z;
+		if (World_ContainsXZ(cx, cz)) {
+			int cy = min((int)camPos.y, World.Height - 1);
+			for (; cy >= 0; cy--) {
+				BlockID blk = World_GetBlock(cx, cy, cz);
+				if (Blocks.Draw[blk] == DRAW_TRANSLUCENT) {
+					waterY = (float)(cy + 1); /* top face of translucent block */
+					break;
+				}
+			}
+		}
+		if (Gfx_BeginReflectionPass(waterY, &refl_mvp)) {
+			FrustumCulling_CalcFrustumEquations(&refl_mvp);
+			MapRenderer_RecomputeVisibility(); /* re-cull chunks for reflected camera */
+			EnvRenderer_RenderSky();
+			EnvRenderer_RenderClouds();
+			MapRenderer_RenderNormal(delta);
+			EnvRenderer_RenderMapSides();
+			Gfx_EndReflectionPass();
+			FrustumCulling_CalcFrustumEquations(&mvp);
+			MapRenderer_RecomputeVisibility(); /* restore chunk visibility for normal camera */
+		}
+	}
+
+	/* Render water/translucent blocks with reflection shader applied to all of them */
 	pos = Camera.CurrentPos;
+	Gfx_BeginWaterRender();
 	if (pos.y < Env.EdgeHeight && (pos.x < 0 || pos.z < 0 || pos.x > World.Width || pos.z > World.Length)) {
 		MapRenderer_RenderTranslucent(delta);
 		EnvRenderer_RenderMapEdges();
@@ -573,6 +605,7 @@ static void Render3DFrame(float delta, float t) {
 		EnvRenderer_RenderMapEdges();
 		MapRenderer_RenderTranslucent(delta);
 	}
+	Gfx_EndWaterRender();
 
 	/* Need to render again over top of translucent block, as the selection outline */
 	/* is drawn without writing to the depth buffer */
@@ -583,6 +616,35 @@ static void Render3DFrame(float delta, float t) {
 	Selections_Render();
 	EntityNames_RenderHovered();
 	if (!Game_HideGui) HeldBlockRenderer_Render(delta);
+
+	/* God ray composite: project sun direction into screen space, then additively
+	   blend the radial-blur result onto the framebuffer.
+	   Only runs when smooth-angled lighting is active and sun is in front of camera. */
+	if (Lighting_Mode == LIGHTING_MODE_SMOOTH_ANGLED) {
+		float angle_rad = FancyLighting_GetSmoothAngle() * MATH_DEG2RAD;
+		float elev_rad  = FancyLighting_GetSmoothElevation() * MATH_DEG2RAD;
+		/* Sun unit direction in world space */
+		float sdx = Math_SinF(angle_rad);
+		float sdz = Math_CosF(angle_rad);
+		float sdy = Math_SinF(elev_rad) / Math_CosF(elev_rad); /* tan(elevation) */
+		float len = Math_SqrtF(sdx*sdx + sdy*sdy + sdz*sdz);
+		sdx /= len; sdy /= len; sdz /= len;
+		/* Transform a far point in the sun direction to clip space */
+		/* row-vector convention: clip = world * MVP */
+		{
+			Vec3 cam = Camera.CurrentPos;
+			float sx = cam.x + sdx * 10000.0f;
+			float sy = cam.y + sdy * 10000.0f;
+			float sz = cam.z + sdz * 10000.0f;
+			float cx = sx*mvp.row1.x + sy*mvp.row2.x + sz*mvp.row3.x + mvp.row4.x;
+			float cy = sx*mvp.row1.y + sy*mvp.row2.y + sz*mvp.row3.y + mvp.row4.y;
+			float cw = sx*mvp.row1.w + sy*mvp.row2.w + sz*mvp.row3.w + mvp.row4.w;
+			if (cw > 0.001f) {
+				float sunX = cx / cw * 0.5f + 0.5f;
+				float sunY = cy / cw * 0.5f + 0.5f;
+			}
+		}
+	}
 }
 
 static void Render3D_Anaglyph(float delta, float t) {

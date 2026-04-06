@@ -14,7 +14,8 @@ struct IGameComponent;
 extern struct IGameComponent Lighting_Component;
 
 enum LightingMode {
-	LIGHTING_MODE_CLASSIC, LIGHTING_MODE_FANCY, LIGHTING_MODE_COUNT
+	LIGHTING_MODE_CLASSIC, LIGHTING_MODE_FANCY, LIGHTING_MODE_ANGLED,
+	LIGHTING_MODE_SMOOTH_ANGLED, LIGHTING_MODE_COUNT
 };
 extern const char* const LightingMode_Names[LIGHTING_MODE_COUNT];
 extern cc_uint8 Lighting_Mode;
@@ -67,15 +68,39 @@ CC_VAR extern struct _Lighting {
 	/* _Fast functions also do NOT check coordinates are inside the map */
 
 	cc_bool   (*IsLit_Fast)(int x, int y, int z);
+	/* Returns whether the given float-precision height at (x,z) is in sunlight. */
+	/* May be NULL if the current lighting mode does not support sub-block precision. */
+	cc_bool   (*IsLit_AtHeight)(int x, float height, int z);
 	PackedCol (*Color_Sprite_Fast)(int x, int y, int z);
 	PackedCol (*Color_YMax_Fast)(int x, int y, int z);
 	PackedCol (*Color_YMin_Fast)(int x, int y, int z);
 	PackedCol (*Color_XSide_Fast)(int x, int y, int z);
 	PackedCol (*Color_ZSide_Fast)(int x, int y, int z);
+	PackedCol (*Color_XSideMin_Fast)(int x, int y, int z);
+	PackedCol (*Color_ZSideMin_Fast)(int x, int y, int z);
+	/* Called once per frame to update time-based lighting state. May be NULL. */
+	void (*Tick)(float delta);
 } Lighting;
 
 void FancyLighting_SetActive(void);
 void FancyLighting_OnInit(void);
+
+/* Angled Fancy lighting: sun direction (0=NE, 1=NW, 2=SW, 3=SE) */
+int     FancyLighting_GetSunDir(void);
+void    FancyLighting_SetSunDir(int dir);
+/* Angled Fancy lighting: whether the sun direction auto-cycles */
+cc_bool FancyLighting_GetSunCycle(void);
+void    FancyLighting_SetSunCycle(cc_bool enabled);
+
+/* Fancier Angled lighting: shadow direction in degrees (0=N/+Z, 90=E/+X, 180=S/-Z, 270=W/-X) */
+float   FancyLighting_GetSmoothAngle(void);
+void    FancyLighting_SetSmoothAngle(float angle);
+/* Fancier Angled lighting: sun elevation in degrees above horizon (1-89) */
+float   FancyLighting_GetSmoothElevation(void);
+void    FancyLighting_SetSmoothElevation(float elev);
+/* Fancier Angled lighting: shadow rotation speed in degrees/sec (0 = no cycle) */
+float   FancyLighting_GetSmoothCycleSpeed(void);
+void    FancyLighting_SetSmoothCycleSpeed(float spd);
 
 /* Expose ClassicLighting functions for reuse in Fancy lighting */
 void ClassicLighting_Refresh(void);

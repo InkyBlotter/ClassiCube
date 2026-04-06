@@ -1,5 +1,6 @@
 #include "MapRenderer.h"
 #include "Block.h"
+#include "Lighting.h"
 #include "Builder.h"
 #include "Camera.h"
 #include "Entity.h"
@@ -708,8 +709,30 @@ static void UpdateSortOrder(void) {
 
 void MapRenderer_Update(float delta) {
 	if (!mapChunks) return;
+	if (Lighting.Tick) Lighting.Tick(delta);
 	UpdateSortOrder();
 	UpdateChunks(delta);
+}
+
+/* Re-evaluates chunk visibility against the CURRENT frustum without rebuilding geometry.
+   Call after FrustumCulling_CalcFrustumEquations to update renderChunks for a new viewpoint
+   (e.g. before rendering into the reflection FBO, then again after restoring the normal frustum). */
+void MapRenderer_RecomputeVisibility(void) {
+	int renderDistSqr = renderDistSquared;
+	struct ChunkInfo* info;
+	int i, j = 0, distSqr;
+
+	if (!mapChunks) return;
+	for (i = 0; i < chunksCount; i++) {
+		info = sortedChunks[i];
+		if (info->empty) continue;
+		distSqr = distances[i];
+		info->visible = distSqr <= renderDistSqr &&
+			FrustumCulling_SphereInFrustum(info->centreX, info->centreY, info->centreZ, 14);
+		if (info->visible) { renderChunks[j] = info; j++; }
+	}
+	renderChunksCount = j;
+	ResetPartFlags();
 }
 
 void MapRenderer_BuildAllChunks(void) {

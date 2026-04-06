@@ -13,7 +13,7 @@
 #include "Options.h"
 #include "Builder.h"
 
-const char* const LightingMode_Names[LIGHTING_MODE_COUNT] = { "Classic", "Fancy" };
+const char* const LightingMode_Names[LIGHTING_MODE_COUNT] = { "Classic", "Fancy", "Angled Fancy", "Fancier Angled" };
 
 cc_uint8 Lighting_Mode;
 cc_bool  Lighting_ModeLockedByServer;
@@ -410,16 +410,20 @@ static void ClassicLighting_SetActive(void) {
 	Lighting.Color          = smoothLighting ? SmoothLighting_Color : ClassicLighting_Color;
 	Lighting.Color_XSide    = ClassicLighting_Color_XSide;
 
-	Lighting.IsLit_Fast        = ClassicLighting_IsLit_Fast;
-	Lighting.Color_Sprite_Fast = ClassicLighting_Color_Sprite_Fast;
-	Lighting.Color_YMax_Fast   = ClassicLighting_Color_YMax_Fast;
-	Lighting.Color_YMin_Fast   = ClassicLighting_Color_YMin_Fast;
-	Lighting.Color_XSide_Fast  = ClassicLighting_Color_XSide_Fast;
-	Lighting.Color_ZSide_Fast  = ClassicLighting_Color_ZSide_Fast;
+	Lighting.IsLit_Fast          = ClassicLighting_IsLit_Fast;
+	Lighting.Color_Sprite_Fast   = ClassicLighting_Color_Sprite_Fast;
+	Lighting.Color_YMax_Fast     = ClassicLighting_Color_YMax_Fast;
+	Lighting.Color_YMin_Fast     = ClassicLighting_Color_YMin_Fast;
+	Lighting.Color_XSide_Fast    = ClassicLighting_Color_XSide_Fast;
+	Lighting.Color_ZSide_Fast    = ClassicLighting_Color_ZSide_Fast;
+	Lighting.Color_XSideMin_Fast = ClassicLighting_Color_XSide_Fast;
+	Lighting.Color_ZSideMin_Fast = ClassicLighting_Color_ZSide_Fast;
 
 	Lighting.FreeState  = ClassicLighting_FreeState;
 	Lighting.AllocState = ClassicLighting_AllocState;
-	Lighting.LightHint  = ClassicLighting_LightHint;
+	Lighting.LightHint      = ClassicLighting_LightHint;
+	Lighting.Tick           = NULL;
+	Lighting.IsLit_AtHeight = NULL;
 }
 
 

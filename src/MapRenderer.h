@@ -69,6 +69,9 @@ void MapRenderer_RenderTranslucent(float delta);
 /* Potentially builds meshes for several nearby chunks. */
 /* NOTE: This should be called once per frame. */
 void MapRenderer_Update(float delta);
+/* Re-evaluates chunk visibility against the CURRENT frustum without rebuilding geometry.
+   Used to refresh renderChunks when switching to/from a reflection camera viewpoint. */
+void MapRenderer_RecomputeVisibility(void);
 
 /* Marks the given chunk as needing to be rebuilt/redrawn. */
 /* NOTE: Coordinates outside the map are simply ignored. */

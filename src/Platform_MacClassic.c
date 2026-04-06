@@ -286,6 +286,8 @@ cc_result Directory_Enum(const cc_string* dirPath, void* obj, Directory_EnumCall
 	return ERR_NOT_SUPPORTED;
 }
 
+cc_result File_Delete(const cc_filepath* path) { return unlink(path->buffer) == 0 ? 0 : errno; }
+
 cc_result File_Open(cc_file* file, const cc_filepath* path) {
 	return DoOpenDF(path->buffer, fsRdPerm, file);
 }

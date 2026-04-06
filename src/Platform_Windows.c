@@ -376,6 +376,14 @@ static cc_result DoFile(cc_file* file, const cc_filepath* path, DWORD access, DW
 	return *file != INVALID_HANDLE_VALUE ? 0 : GetLastError();
 }
 
+cc_result File_Delete(const cc_filepath* path) {
+	if (DeleteFileW(path->uni)) return 0;
+	cc_result res = GetLastError();
+	/* Windows 9x does not support W API functions */
+	if (res != ERROR_CALL_NOT_IMPLEMENTED) return res;
+	return DeleteFileA(path->ansi) ? 0 : GetLastError();
+}
+
 cc_result File_Open(cc_file* file, const cc_filepath* path) {
 	return DoFile(file, path, GENERIC_READ, OPEN_EXISTING);
 }

@@ -113,7 +113,7 @@ static void Menu_SwitchPause(void* a, void* b)     { Gui_ShowPauseMenu(); }
 *#########################################################################################################################*/
 struct MenuOptionsScreen;
 typedef void (*InitMenuOptions)(struct MenuOptionsScreen* s);
-#define MENUOPTS_MAX_OPTS 11
+#define MENUOPTS_MAX_OPTS 16
 static void MenuOptionsScreen_Layout(void* screen);
 
 static struct MenuOptionsScreen {
@@ -1149,10 +1149,22 @@ static void    MiO_SetPhysics(cc_bool v) {
 }
 
 static cc_bool MiO_GetInvert(void) { return Camera.Invert; }
-static void    MiO_SetInvert(cc_bool v) { 
+static void    MiO_SetInvert(cc_bool v) {
 	Camera.Invert = v;
-	Options_SetBool(OPT_INVERT_MOUSE, v); 
+	Options_SetBool(OPT_INVERT_MOUSE, v);
 }
+
+static cc_bool MiO_GetSunCycle(void)  { return FancyLighting_GetSunCycle(); }
+static void    MiO_SetSunCycle(cc_bool v) { FancyLighting_SetSunCycle(v); }
+
+static int  MiO_GetSmoothAngle(void)  { return (int)FancyLighting_GetSmoothAngle(); }
+static void MiO_SetSmoothAngle(int v) { FancyLighting_SetSmoothAngle((float)v); }
+
+static int  MiO_GetSmoothElev(void)  { return (int)FancyLighting_GetSmoothElevation(); }
+static void MiO_SetSmoothElev(int v) { FancyLighting_SetSmoothElevation((float)v); }
+
+static int  MiO_GetSmoothCycleSpd(void)  { return (int)FancyLighting_GetSmoothCycleSpeed(); }
+static void MiO_SetSmoothCycleSpd(int v) { FancyLighting_SetSmoothCycleSpeed((float)v); }
 
 static int  MiO_GetSensitivity(void)  { return Camera.Sensitivity; }
 static void MiO_SetSensitivity(int v) {
@@ -1185,13 +1197,28 @@ static void MiscSettingsScreen_InitWidgets(struct MenuOptionsScreen* s) {
 			MiO_GetViewBob, MiO_SetViewBob, NULL);
 		MenuOptionsScreen_AddBool(s, "Invert mouse",
 			MiO_GetInvert,  MiO_SetInvert, NULL);
-		MenuOptionsScreen_AddInt(s,  "Mouse sensitivity", 
+		MenuOptionsScreen_AddInt(s,  "Mouse sensitivity",
 #ifdef CC_BUILD_WIN
 			   1, 200, 40,
 #else
 			   1, 200, 30,
 #endif
 			MiO_GetSensitivity, MiO_SetSensitivity, NULL);
+		MenuOptionsScreen_AddBool(s, "Sun angle cycle",
+			MiO_GetSunCycle, MiO_SetSunCycle,
+			"&eAutomatically rotates the sun direction. &cRequires Angled Fancy lighting.");
+		MenuOptionsScreen_AddInt(s, "Shadow angle",
+			0, 359, 45,
+			MiO_GetSmoothAngle, MiO_SetSmoothAngle,
+			"&eShadow direction in degrees (0=N, 90=E, 180=S, 270=W). &cRequires Fancier Angled lighting.");
+		MenuOptionsScreen_AddInt(s, "Sun elevation",
+			1, 89, 45,
+			MiO_GetSmoothElev, MiO_SetSmoothElev,
+			"&eSun height above horizon in degrees (1-89). &cRequires Fancier Angled lighting.");
+		MenuOptionsScreen_AddInt(s, "Shadow cycle speed",
+			0, 360, 0,
+			MiO_GetSmoothCycleSpd, MiO_SetSmoothCycleSpd,
+			"&eShadow rotation speed in degrees/sec (0=disabled). &cRequires Fancier Angled lighting.");
 	}
 	MenuOptionsScreen_EndButtons(s, -1, Menu_SwitchOptions);
 

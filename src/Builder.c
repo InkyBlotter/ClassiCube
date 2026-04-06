@@ -570,11 +570,11 @@ static PackedCol Normal_LightColor(int x, int y, int z, Face face, BlockID block
 	case FACE_XMIN:
 		return x < offset                ? Env.SunXSide : Lighting.Color_XSide_Fast(x - offset, y, z);
 	case FACE_XMAX:
-		return x > (World.MaxX - offset) ? Env.SunXSide : Lighting.Color_XSide_Fast(x + offset, y, z);
+		return Lighting.Color_XSide_Fast(min(x + offset, World.MaxX), y, z);
 	case FACE_ZMIN:
 		return z < offset                ? Env.SunZSide : Lighting.Color_ZSide_Fast(x, y, z - offset);
 	case FACE_ZMAX:
-		return z > (World.MaxZ - offset) ? Env.SunZSide : Lighting.Color_ZSide_Fast(x, y, z + offset);
+		return Lighting.Color_ZSide_Fast(x, y, min(z + offset, World.MaxZ));
 
 	case FACE_YMIN:
 		return Lighting.Color_YMin_Fast(x, y - offset, z);		
@@ -709,7 +709,7 @@ static void NormalBuilder_RenderBlock(int index, int x, int y, int z) {
 		part   = &Builder_Parts[baseOffset + Atlas1D_Index(loc)];
 
 		col = fullBright ? PACKEDCOL_WHITE :
-			x <= (World.MaxX - offset) ? Lighting.Color_XSide_Fast(x + offset, y, z) : Env.SunXSide;
+			Lighting.Color_XSide_Fast(min(x + offset, World.MaxX), y, z);
 		Drawer_XMax(count_XMax, col, loc, &part->faces.vertices[FACE_XMAX]);
 	}
 
@@ -729,7 +729,7 @@ static void NormalBuilder_RenderBlock(int index, int x, int y, int z) {
 		part   = &Builder_Parts[baseOffset + Atlas1D_Index(loc)];
 
 		col = fullBright ? PACKEDCOL_WHITE :
-			z <= (World.MaxZ - offset) ? Lighting.Color_ZSide_Fast(x, y, z + offset) : Env.SunZSide;
+			Lighting.Color_ZSide_Fast(x, y, min(z + offset, World.MaxZ));
 		Drawer_ZMax(count_ZMax, col, loc, &part->faces.vertices[FACE_ZMAX]);
 	}
 
@@ -777,6 +777,7 @@ static void NormalBuilder_SetActive(void) {
 #ifdef CC_BUILD_ADVLIGHTING
 static Vec3 adv_minBB, adv_maxBB;
 static int adv_initBitFlags, adv_baseOffset;
+static cc_bool adv_initLitState;
 static int* adv_bitFlags;
 static float adv_x1, adv_y1, adv_z1, adv_x2, adv_y2, adv_z2;
 static PackedCol adv_lerp[5], adv_lerpX[5], adv_lerpZ[5], adv_lerpY[5];
@@ -888,6 +889,10 @@ static cc_bool Adv_CanStretch(BlockID initial, int chunkIndex, int x, int y, int
 	BlockID cur = Builder_Chunk[chunkIndex];
 	adv_bitFlags[chunkIndex] = Adv_ComputeLightFlags(x, y, z, chunkIndex);
 
+	/* Don't merge across shadow boundaries - prevents wide shadow gradients */
+	if (Lighting.IsLit_AtHeight && !Builder_FullBright &&
+		Lighting.IsLit_AtHeight(x, (float)(y + 1), z) != adv_initLitState) return false;
+
 	return cur == initial
 		&& !Block_IsFaceHidden(cur, Builder_Chunk[chunkIndex + Builder_Offsets[face]], face)
 		&& (adv_initBitFlags == adv_bitFlags[chunkIndex]
@@ -900,6 +905,8 @@ static int Adv_StretchXLiquid(int countIndex, int x, int y, int z, int chunkInde
 	if (Builder_OccludedLiquid(chunkIndex)) return 0;
 	adv_initBitFlags = Adv_ComputeLightFlags(x, y, z, chunkIndex);
 	adv_bitFlags[chunkIndex] = adv_initBitFlags;
+	if (Lighting.IsLit_AtHeight && !Builder_FullBright)
+		adv_initLitState = Lighting.IsLit_AtHeight(x, (float)(y + 1), z);
 
 	x++;
 	chunkIndex++;
@@ -921,6 +928,8 @@ static int Adv_StretchX(int countIndex, int x, int y, int z, int chunkIndex, Blo
 	int count = 1; cc_bool stretchTile;
 	adv_initBitFlags = Adv_ComputeLightFlags(x, y, z, chunkIndex);
 	adv_bitFlags[chunkIndex] = adv_initBitFlags;
+	if (Lighting.IsLit_AtHeight && !Builder_FullBright)
+		adv_initLitState = Lighting.IsLit_AtHeight(x, (float)(y + 1), z);
 	
 	x++;
 	chunkIndex++;
@@ -942,6 +951,8 @@ static int Adv_StretchZ(int countIndex, int x, int y, int z, int chunkIndex, Blo
 	int count = 1; cc_bool stretchTile;
 	adv_initBitFlags = Adv_ComputeLightFlags(x, y, z, chunkIndex);
 	adv_bitFlags[chunkIndex] = adv_initBitFlags;
+	if (Lighting.IsLit_AtHeight && !Builder_FullBright)
+		adv_initLitState = Lighting.IsLit_AtHeight(x, (float)(y + 1), z);
 
 	z++;
 	chunkIndex += EXTCHUNK_SIZE;
@@ -972,10 +983,19 @@ static void Adv_DrawXMin(int count) {
 	struct Builder1DPart* part = &Builder_Parts[adv_baseOffset + Atlas1D_Index(texLoc)];
 
 	int F = adv_bitFlags[Builder_ChunkIndex];
-	int aY0_Z0 = Adv_CountBits(F, xM1_yM1_zM1, xM1_yCC_zM1, xM1_yM1_zCC, xM1_yCC_zCC);
-	int aY0_Z1 = Adv_CountBits(F, xM1_yM1_zP1, xM1_yCC_zP1, xM1_yM1_zCC, xM1_yCC_zCC);
-	int aY1_Z0 = Adv_CountBits(F, xM1_yP1_zM1, xM1_yCC_zM1, xM1_yP1_zCC, xM1_yCC_zCC);
-	int aY1_Z1 = Adv_CountBits(F, xM1_yP1_zP1, xM1_yCC_zP1, xM1_yP1_zCC, xM1_yCC_zCC);
+	int aY0_Z0, aY0_Z1, aY1_Z0, aY1_Z1;
+	if (Lighting.IsLit_AtHeight && !Builder_FullBright) {
+		int cx = (int)adv_x1, cz0 = (int)adv_z1, cz1 = (int)(adv_z2 + (count - 1));
+		aY0_Z0 = Lighting.IsLit_AtHeight(cx, adv_y1, cz0) ? 4 : 0;
+		aY1_Z0 = Lighting.IsLit_AtHeight(cx, adv_y2, cz0) ? 4 : 0;
+		aY0_Z1 = Lighting.IsLit_AtHeight(cx, adv_y1, cz1) ? 4 : 0;
+		aY1_Z1 = Lighting.IsLit_AtHeight(cx, adv_y2, cz1) ? 4 : 0;
+	} else {
+		aY0_Z0 = Adv_CountBits(F, xM1_yM1_zM1, xM1_yCC_zM1, xM1_yM1_zCC, xM1_yCC_zCC);
+		aY0_Z1 = Adv_CountBits(F, xM1_yM1_zP1, xM1_yCC_zP1, xM1_yM1_zCC, xM1_yCC_zCC);
+		aY1_Z0 = Adv_CountBits(F, xM1_yP1_zM1, xM1_yCC_zM1, xM1_yP1_zCC, xM1_yCC_zCC);
+		aY1_Z1 = Adv_CountBits(F, xM1_yP1_zP1, xM1_yCC_zP1, xM1_yP1_zCC, xM1_yCC_zCC);
+	}
 
 	PackedCol tint, white = PACKEDCOL_WHITE;
 	PackedCol col0_0 = Builder_FullBright ? white : adv_lerpX[aY0_Z0], col1_0 = Builder_FullBright ? white : adv_lerpX[aY1_Z0];
@@ -1014,10 +1034,19 @@ static void Adv_DrawXMax(int count) {
 	struct Builder1DPart* part = &Builder_Parts[adv_baseOffset + Atlas1D_Index(texLoc)];
 
 	int F = adv_bitFlags[Builder_ChunkIndex];
-	int aY0_Z0 = Adv_CountBits(F, xP1_yM1_zM1, xP1_yCC_zM1, xP1_yM1_zCC, xP1_yCC_zCC);
-	int aY0_Z1 = Adv_CountBits(F, xP1_yM1_zP1, xP1_yCC_zP1, xP1_yM1_zCC, xP1_yCC_zCC);
-	int aY1_Z0 = Adv_CountBits(F, xP1_yP1_zM1, xP1_yCC_zM1, xP1_yP1_zCC, xP1_yCC_zCC);
-	int aY1_Z1 = Adv_CountBits(F, xP1_yP1_zP1, xP1_yCC_zP1, xP1_yP1_zCC, xP1_yCC_zCC);
+	int aY0_Z0, aY0_Z1, aY1_Z0, aY1_Z1;
+	if (Lighting.IsLit_AtHeight && !Builder_FullBright) {
+		int cx = (int)adv_x2, cz0 = (int)adv_z1, cz1 = (int)(adv_z2 + (count - 1));
+		aY0_Z0 = Lighting.IsLit_AtHeight(cx, adv_y1, cz0) ? 4 : 0;
+		aY1_Z0 = Lighting.IsLit_AtHeight(cx, adv_y2, cz0) ? 4 : 0;
+		aY0_Z1 = Lighting.IsLit_AtHeight(cx, adv_y1, cz1) ? 4 : 0;
+		aY1_Z1 = Lighting.IsLit_AtHeight(cx, adv_y2, cz1) ? 4 : 0;
+	} else {
+		aY0_Z0 = Adv_CountBits(F, xP1_yM1_zM1, xP1_yCC_zM1, xP1_yM1_zCC, xP1_yCC_zCC);
+		aY0_Z1 = Adv_CountBits(F, xP1_yM1_zP1, xP1_yCC_zP1, xP1_yM1_zCC, xP1_yCC_zCC);
+		aY1_Z0 = Adv_CountBits(F, xP1_yP1_zM1, xP1_yCC_zM1, xP1_yP1_zCC, xP1_yCC_zCC);
+		aY1_Z1 = Adv_CountBits(F, xP1_yP1_zP1, xP1_yCC_zP1, xP1_yP1_zCC, xP1_yCC_zCC);
+	}
 
 	PackedCol tint, white = PACKEDCOL_WHITE;
 	PackedCol col0_0 = Builder_FullBright ? white : adv_lerpX[aY0_Z0], col1_0 = Builder_FullBright ? white : adv_lerpX[aY1_Z0];
@@ -1056,10 +1085,19 @@ static void Adv_DrawZMin(int count) {
 	struct Builder1DPart* part = &Builder_Parts[adv_baseOffset + Atlas1D_Index(texLoc)];
 
 	int F = adv_bitFlags[Builder_ChunkIndex];
-	int aX0_Y0 = Adv_CountBits(F, xM1_yM1_zM1, xM1_yCC_zM1, xCC_yM1_zM1, xCC_yCC_zM1);
-	int aX0_Y1 = Adv_CountBits(F, xM1_yP1_zM1, xM1_yCC_zM1, xCC_yP1_zM1, xCC_yCC_zM1);
-	int aX1_Y0 = Adv_CountBits(F, xP1_yM1_zM1, xP1_yCC_zM1, xCC_yM1_zM1, xCC_yCC_zM1);
-	int aX1_Y1 = Adv_CountBits(F, xP1_yP1_zM1, xP1_yCC_zM1, xCC_yP1_zM1, xCC_yCC_zM1);
+	int aX0_Y0, aX0_Y1, aX1_Y0, aX1_Y1;
+	if (Lighting.IsLit_AtHeight && !Builder_FullBright) {
+		int cz = (int)adv_z1, cx0 = (int)adv_x1, cx1 = (int)(adv_x2 + (count - 1));
+		aX0_Y0 = Lighting.IsLit_AtHeight(cx0, adv_y1, cz) ? 4 : 0;
+		aX1_Y0 = Lighting.IsLit_AtHeight(cx1, adv_y1, cz) ? 4 : 0;
+		aX0_Y1 = Lighting.IsLit_AtHeight(cx0, adv_y2, cz) ? 4 : 0;
+		aX1_Y1 = Lighting.IsLit_AtHeight(cx1, adv_y2, cz) ? 4 : 0;
+	} else {
+		aX0_Y0 = Adv_CountBits(F, xM1_yM1_zM1, xM1_yCC_zM1, xCC_yM1_zM1, xCC_yCC_zM1);
+		aX0_Y1 = Adv_CountBits(F, xM1_yP1_zM1, xM1_yCC_zM1, xCC_yP1_zM1, xCC_yCC_zM1);
+		aX1_Y0 = Adv_CountBits(F, xP1_yM1_zM1, xP1_yCC_zM1, xCC_yM1_zM1, xCC_yCC_zM1);
+		aX1_Y1 = Adv_CountBits(F, xP1_yP1_zM1, xP1_yCC_zM1, xCC_yP1_zM1, xCC_yCC_zM1);
+	}
 
 	PackedCol tint, white = PACKEDCOL_WHITE;
 	PackedCol col0_0 = Builder_FullBright ? white : adv_lerpZ[aX0_Y0], col1_0 = Builder_FullBright ? white : adv_lerpZ[aX1_Y0];
@@ -1098,10 +1136,19 @@ static void Adv_DrawZMax(int count) {
 	struct Builder1DPart* part = &Builder_Parts[adv_baseOffset + Atlas1D_Index(texLoc)];
 
 	int F = adv_bitFlags[Builder_ChunkIndex];
-	int aX0_Y0 = Adv_CountBits(F, xM1_yM1_zP1, xM1_yCC_zP1, xCC_yM1_zP1, xCC_yCC_zP1);
-	int aX1_Y0 = Adv_CountBits(F, xP1_yM1_zP1, xP1_yCC_zP1, xCC_yM1_zP1, xCC_yCC_zP1);
-	int aX0_Y1 = Adv_CountBits(F, xM1_yP1_zP1, xM1_yCC_zP1, xCC_yP1_zP1, xCC_yCC_zP1);
-	int aX1_Y1 = Adv_CountBits(F, xP1_yP1_zP1, xP1_yCC_zP1, xCC_yP1_zP1, xCC_yCC_zP1);
+	int aX0_Y0, aX0_Y1, aX1_Y0, aX1_Y1;
+	if (Lighting.IsLit_AtHeight && !Builder_FullBright) {
+		int cz = (int)adv_z2, cx0 = (int)adv_x1, cx1 = (int)(adv_x2 + (count - 1));
+		aX0_Y0 = Lighting.IsLit_AtHeight(cx0, adv_y1, cz) ? 4 : 0;
+		aX1_Y0 = Lighting.IsLit_AtHeight(cx1, adv_y1, cz) ? 4 : 0;
+		aX0_Y1 = Lighting.IsLit_AtHeight(cx0, adv_y2, cz) ? 4 : 0;
+		aX1_Y1 = Lighting.IsLit_AtHeight(cx1, adv_y2, cz) ? 4 : 0;
+	} else {
+		aX0_Y0 = Adv_CountBits(F, xM1_yM1_zP1, xM1_yCC_zP1, xCC_yM1_zP1, xCC_yCC_zP1);
+		aX1_Y0 = Adv_CountBits(F, xP1_yM1_zP1, xP1_yCC_zP1, xCC_yM1_zP1, xCC_yCC_zP1);
+		aX0_Y1 = Adv_CountBits(F, xM1_yP1_zP1, xM1_yCC_zP1, xCC_yP1_zP1, xCC_yCC_zP1);
+		aX1_Y1 = Adv_CountBits(F, xP1_yP1_zP1, xP1_yCC_zP1, xCC_yP1_zP1, xCC_yCC_zP1);
+	}
 
 	PackedCol tint, white = PACKEDCOL_WHITE;
 	PackedCol col1_1 = Builder_FullBright ? white : adv_lerpZ[aX1_Y1], col1_0 = Builder_FullBright ? white : adv_lerpZ[aX1_Y0];
@@ -1140,10 +1187,20 @@ static void Adv_DrawYMin(int count) {
 	struct Builder1DPart* part = &Builder_Parts[adv_baseOffset + Atlas1D_Index(texLoc)];
 
 	int F = adv_bitFlags[Builder_ChunkIndex];
-	int aX0_Z0 = Adv_CountBits(F, xM1_yM1_zM1, xM1_yM1_zCC, xCC_yM1_zM1, xCC_yM1_zCC);
-	int aX1_Z0 = Adv_CountBits(F, xP1_yM1_zM1, xP1_yM1_zCC, xCC_yM1_zM1, xCC_yM1_zCC);
-	int aX0_Z1 = Adv_CountBits(F, xM1_yM1_zP1, xM1_yM1_zCC, xCC_yM1_zP1, xCC_yM1_zCC);
-	int aX1_Z1 = Adv_CountBits(F, xP1_yM1_zP1, xP1_yM1_zCC, xCC_yM1_zP1, xCC_yM1_zCC);
+	int aX0_Z0, aX0_Z1, aX1_Z0, aX1_Z1;
+	if (Lighting.IsLit_AtHeight && !Builder_FullBright) {
+		int cx0 = (int)adv_x1, cx1 = (int)(adv_x2 + (count - 1));
+		int cz0 = (int)adv_z1, cz1 = (int)adv_z2;
+		aX0_Z0 = Lighting.IsLit_AtHeight(cx0, adv_y1, cz0) ? 4 : 0;
+		aX1_Z0 = Lighting.IsLit_AtHeight(cx1, adv_y1, cz0) ? 4 : 0;
+		aX0_Z1 = Lighting.IsLit_AtHeight(cx0, adv_y1, cz1) ? 4 : 0;
+		aX1_Z1 = Lighting.IsLit_AtHeight(cx1, adv_y1, cz1) ? 4 : 0;
+	} else {
+		aX0_Z0 = Adv_CountBits(F, xM1_yM1_zM1, xM1_yM1_zCC, xCC_yM1_zM1, xCC_yM1_zCC);
+		aX1_Z0 = Adv_CountBits(F, xP1_yM1_zM1, xP1_yM1_zCC, xCC_yM1_zM1, xCC_yM1_zCC);
+		aX0_Z1 = Adv_CountBits(F, xM1_yM1_zP1, xM1_yM1_zCC, xCC_yM1_zP1, xCC_yM1_zCC);
+		aX1_Z1 = Adv_CountBits(F, xP1_yM1_zP1, xP1_yM1_zCC, xCC_yM1_zP1, xCC_yM1_zCC);
+	}
 
 	PackedCol tint, white = PACKEDCOL_WHITE;
 	PackedCol col0_1 = Builder_FullBright ? white : adv_lerpY[aX0_Z1], col1_1 = Builder_FullBright ? white : adv_lerpY[aX1_Z1];
@@ -1182,10 +1239,20 @@ static void Adv_DrawYMax(int count) {
 	struct Builder1DPart* part = &Builder_Parts[adv_baseOffset + Atlas1D_Index(texLoc)];
 
 	int F = adv_bitFlags[Builder_ChunkIndex];
-	int aX0_Z0 = Adv_CountBits(F, xM1_yP1_zM1, xM1_yP1_zCC, xCC_yP1_zM1, xCC_yP1_zCC);
-	int aX1_Z0 = Adv_CountBits(F, xP1_yP1_zM1, xP1_yP1_zCC, xCC_yP1_zM1, xCC_yP1_zCC);
-	int aX0_Z1 = Adv_CountBits(F, xM1_yP1_zP1, xM1_yP1_zCC, xCC_yP1_zP1, xCC_yP1_zCC);
-	int aX1_Z1 = Adv_CountBits(F, xP1_yP1_zP1, xP1_yP1_zCC, xCC_yP1_zP1, xCC_yP1_zCC);
+	int aX0_Z0, aX0_Z1, aX1_Z0, aX1_Z1;
+	if (Lighting.IsLit_AtHeight && !Builder_FullBright) {
+		int cx0 = (int)adv_x1, cx1 = (int)(adv_x2 + (count - 1));
+		int cz0 = (int)adv_z1, cz1 = (int)adv_z2;
+		aX0_Z0 = Lighting.IsLit_AtHeight(cx0, adv_y2, cz0) ? 4 : 0;
+		aX1_Z0 = Lighting.IsLit_AtHeight(cx1, adv_y2, cz0) ? 4 : 0;
+		aX0_Z1 = Lighting.IsLit_AtHeight(cx0, adv_y2, cz1) ? 4 : 0;
+		aX1_Z1 = Lighting.IsLit_AtHeight(cx1, adv_y2, cz1) ? 4 : 0;
+	} else {
+		aX0_Z0 = Adv_CountBits(F, xM1_yP1_zM1, xM1_yP1_zCC, xCC_yP1_zM1, xCC_yP1_zCC);
+		aX1_Z0 = Adv_CountBits(F, xP1_yP1_zM1, xP1_yP1_zCC, xCC_yP1_zM1, xCC_yP1_zCC);
+		aX0_Z1 = Adv_CountBits(F, xM1_yP1_zP1, xM1_yP1_zCC, xCC_yP1_zP1, xCC_yP1_zCC);
+		aX1_Z1 = Adv_CountBits(F, xP1_yP1_zP1, xP1_yP1_zCC, xCC_yP1_zP1, xCC_yP1_zCC);
+	}
 
 	PackedCol tint, white = PACKEDCOL_WHITE;
 	PackedCol col0_0 = Builder_FullBright ? white : adv_lerp[aX0_Z0], col1_0 = Builder_FullBright ? white : adv_lerp[aX1_Z0];

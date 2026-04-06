@@ -181,11 +181,14 @@ void Gfx_SetDynamicVbData(GfxResourceID vb, void* vertices, int vCount) {
 #define UNI_FOG_COL    (1 << 2)
 #define UNI_FOG_END    (1 << 3)
 #define UNI_FOG_DENS   (1 << 4)
-#define UNI_MASK_ALL   0x1F
+#define UNI_CLIP_Y     (1 << 5)
+#define UNI_MASK_ALL   0x7F
 
 /* cached uniforms (cached for multiple programs */
 static struct Matrix _view, _proj, _mvp;
 static cc_bool gfx_texTransform;
+static cc_bool gfx_waterMode; /* true when rendering with the water reflection shader */
+static float gfx_refl_clipY = -1e10f; /* world-space Y clip min during reflection pass */
 static float _texX, _texY;
 static PackedCol gfx_fogColor;
 static float gfx_fogEnd = -1.0f, gfx_fogDensity = -1.0f;
@@ -196,7 +199,7 @@ static struct GLShader {
 	int features;     /* what features are enabled for this shader */
 	int uniforms;     /* which associated uniforms need to be resent to GPU */
 	GLuint program;   /* OpenGL program ID (0 if not yet compiled) */
-	int locations[5]; /* location of uniforms (not constant) */
+	int locations[6]; /* location of uniforms (not constant) */
 } shaders[6 * 3] = {
 	/* no fog */
 	{ 0              },
@@ -232,12 +235,14 @@ static void GenVertexShader(const struct GLShader* shader, cc_string* dst) {
 	if (uv) String_AppendConst(dst, "attribute vec2 in_uv;\n");
 	String_AppendConst(dst,         "varying vec4 out_col;\n");
 	if (uv) String_AppendConst(dst, "varying vec2 out_uv;\n");
+	String_AppendConst(dst,         "varying float cc_world_y;\n");
 	String_AppendConst(dst,         "uniform mat4 mvp;\n");
 	if (tm) String_AppendConst(dst, "uniform vec2 texOffset;\n");
 
 	String_AppendConst(dst,         "void main() {\n");
 	String_AppendConst(dst,         "  gl_Position = mvp * vec4(in_pos, 1.0);\n");
 	String_AppendConst(dst,         "  out_col = in_col;\n");
+	String_AppendConst(dst,         "  cc_world_y = in_pos.y;\n");
 	if (uv) String_AppendConst(dst, "  out_uv  = in_uv;\n");
 	if (tm) String_AppendConst(dst, "  out_uv  = out_uv + texOffset;\n");
 	String_AppendConst(dst,         "}");
@@ -268,12 +273,15 @@ static void GenFragmentShader(const struct GLShader* shader, cc_string* dst) {
 
 	String_AppendConst(dst,         "varying vec4 out_col;\n");
 	if (uv) String_AppendConst(dst, "varying vec2 out_uv;\n");
+	String_AppendConst(dst,         "varying float cc_world_y;\n");
+	String_AppendConst(dst,         "uniform float cc_clip_y;\n");
 	if (uv) String_AppendConst(dst, "uniform sampler2D texImage;\n");
 	if (fm) String_AppendConst(dst, "uniform vec3 fogCol;\n");
 	if (fl) String_AppendConst(dst, "uniform float fogEnd;\n");
 	if (fd) String_AppendConst(dst, "uniform float fogDensity;\n");
 
 	String_AppendConst(dst,         "void main() {\n");
+	String_AppendConst(dst,         "  if (cc_world_y < cc_clip_y) discard;\n");
 	if (uv) String_AppendConst(dst, "  vec4 col = texture2D(texImage, out_uv) * out_col;\n");
 	else    String_AppendConst(dst, "  vec4 col = out_col;\n");
 	if (al) String_AppendConst(dst, "  if (col.a < 0.5) discard;\n");
@@ -374,6 +382,7 @@ static void CompileProgram(struct GLShader* shader) {
 		shader->locations[2] = glGetUniformLocation(program, "fogCol");
 		shader->locations[3] = glGetUniformLocation(program, "fogEnd");
 		shader->locations[4] = glGetUniformLocation(program, "fogDensity");
+		shader->locations[5] = glGetUniformLocation(program, "cc_clip_y");
 		return;
 	}
 	temp = 0;
@@ -398,7 +407,7 @@ static void DirtyUniform(int uniform) {
 /* Sends changed uniforms to the GPU for current program */
 static void ReloadUniforms(void) {
 	struct GLShader* s = gfx_activeShader;
-	if (!s) return; /* NULL if context is lost */
+	if (!s) return; /* NULL if context is lost or water mode active */
 
 	if (s->uniforms & UNI_MVP_MATRIX) {
 		glUniformMatrix4fv(s->locations[0], 1, false, (float*)&_mvp);
@@ -423,6 +432,10 @@ static void ReloadUniforms(void) {
 		glUniform1f(s->locations[4], -gfx_fogDensity);
 		s->uniforms &= ~UNI_FOG_DENS;
 	}
+	if (s->uniforms & UNI_CLIP_Y) {
+		glUniform1f(s->locations[5], gfx_refl_clipY);
+		s->uniforms &= ~UNI_CLIP_Y;
+	}
 }
 
 /* Switches program to one that duplicates current fixed function state */
@@ -430,6 +443,7 @@ static void ReloadUniforms(void) {
 static void SwitchProgram(void) {
 	struct GLShader* shader;
 	int index = 0;
+	if (gfx_waterMode) return; /* don't switch away from water shader */
 
 	if (gfx_fogEnabled) {
 		index += 6;                       /* linear fog */
@@ -582,6 +596,8 @@ static void GLBackend_Init(void) {
 #endif
 }
 
+static void FreeReflectionResources(void); /* forward declaration */
+
 static void DeleteShaders(void) {
 	int i;
 	gfx_activeShader = NULL;
@@ -596,6 +612,7 @@ static void Gfx_FreeState(void) {
 	FreeDefaultResources();
 	DeleteShaders();
 	Gfx_DeleteTexture(&white_square);
+	FreeReflectionResources();
 }
 
 static void Gfx_RestoreState(void) {
@@ -606,7 +623,8 @@ static void Gfx_RestoreState(void) {
 	glEnableVertexAttribArray(0);
 	glEnableVertexAttribArray(1);
 
-	gfx_format = -1;
+	gfx_format    = -1;
+	gfx_waterMode = false;
 
 	gfx_clearColor = 0;
 	gfx_fogColor   = 0;
@@ -738,4 +756,295 @@ void Gfx_DrawIndexedTris_T2fC4b(int verticesCount, int startVertex) {
 		glDrawElements(GL_TRIANGLES, ICOUNT(verticesCount), GL_UNSIGNED_SHORT, uint_to_ptr(startVertex * 3));
 	}
 }
+
+
+/*########################################################################################################################*
+*----------------------------------------------------Water reflections----------------------------------------------------*
+*#########################################################################################################################*/
+static GLuint  refl_fbo, refl_tex, refl_rb;
+static int     refl_w, refl_h;
+static cc_bool refl_available;
+
+/* Water reflection shader */
+static GLuint water_prog;
+static GLint  water_loc_mvp, water_loc_tex, water_loc_refl;
+static GLint  water_loc_view, water_loc_proj;
+/* Saved view matrix for restoring after reflection pass */
+static struct Matrix refl_saved_view;
+
+/* Vertex shader — computes the reflective projective UV per-vertex using in_pos.y as
+   the water plane height, so water blocks at any Y work without a height-specific MVP. */
+static const char water_vert_src[] =
+	"attribute vec3 in_pos;\n"
+	"attribute vec4 in_col;\n"
+	"attribute vec2 in_uv;\n"
+	"varying vec4 out_col;\n"
+	"varying vec2 out_uv;\n"
+	"varying vec4 refl_coord;\n"
+	"varying float cc_world_y;\n"
+	"uniform mat4 mvp;\n"
+	"uniform mat4 water_view;\n"
+	"uniform mat4 water_proj;\n"
+	"void main() {\n"
+	"  gl_Position = mvp * vec4(in_pos, 1.0);\n"
+	"  out_col    = in_col;\n"
+	"  out_uv     = in_uv;\n"
+	"  cc_world_y = in_pos.y;\n"
+	"  float h = in_pos.y;\n"
+	"  vec4 p_refl = vec4(in_pos.x, 2.0*h - in_pos.y, in_pos.z, 1.0);\n"
+	"  refl_coord = water_proj * (water_view * p_refl);\n"
+	"}\n";
+
+/* Fragment shader source - blends water texture with projective reflection lookup */
+/* dFdy(cc_world_y) is ~0 on horizontal top faces (Y is constant across them) and
+   nonzero on vertical side faces. We use this to suppress reflections on side faces. */
+#ifdef CC_BUILD_GLES
+static const char water_frag_src[] =
+	"#extension GL_OES_standard_derivatives : enable\n"
+	"precision mediump float;\n"
+	"varying vec4 out_col;\n"
+	"varying vec2 out_uv;\n"
+	"varying vec4 refl_coord;\n"
+	"varying float cc_world_y;\n"
+	"uniform sampler2D texImage;\n"
+	"uniform sampler2D reflTex;\n"
+	"void main() {\n"
+	"  vec4 water = texture2D(texImage, out_uv) * out_col;\n"
+	"  vec2 ruv = clamp(refl_coord.xy / refl_coord.w * 0.5 + 0.5, 0.0, 1.0);\n"
+	"  vec4 refl  = texture2D(reflTex, ruv);\n"
+	"  float horiz = 1.0 - clamp(abs(dFdy(cc_world_y)) * 200.0, 0.0, 1.0);\n"
+	"  gl_FragColor = vec4(mix(water.rgb, refl.rgb, 0.65 * water.a * horiz), water.a);\n"
+	"}\n";
+#else
+static const char water_frag_src[] =
+	"varying vec4 out_col;\n"
+	"varying vec2 out_uv;\n"
+	"varying vec4 refl_coord;\n"
+	"varying float cc_world_y;\n"
+	"uniform sampler2D texImage;\n"
+	"uniform sampler2D reflTex;\n"
+	"void main() {\n"
+	"  vec4 water = texture2D(texImage, out_uv) * out_col;\n"
+	"  vec2 ruv = clamp(refl_coord.xy / refl_coord.w * 0.5 + 0.5, 0.0, 1.0);\n"
+	"  vec4 refl  = texture2D(reflTex, ruv);\n"
+	"  float horiz = 1.0 - clamp(abs(dFdy(cc_world_y)) * 200.0, 0.0, 1.0);\n"
+	"  gl_FragColor = vec4(mix(water.rgb, refl.rgb, 0.65 * water.a * horiz), water.a);\n"
+	"}\n";
+#endif
+
+/* Compiles the water reflection shader program */
+static cc_bool CompileWaterShader(void) {
+	GLuint vs, fs;
+	GLint  status;
+	const char* src;
+
+	vs = glCreateShader(GL_VERTEX_SHADER);
+	if (!vs) return false;
+	src = water_vert_src;
+	glShaderSource(vs, 1, &src, NULL); /* NULL = null-terminated strings */
+	glCompileShader(vs);
+	glGetShaderiv(vs, GL_COMPILE_STATUS, &status);
+	if (!status) { glDeleteShader(vs); return false; }
+
+	fs = glCreateShader(GL_FRAGMENT_SHADER);
+	if (!fs) { glDeleteShader(vs); return false; }
+	src = water_frag_src;
+	glShaderSource(fs, 1, &src, NULL);
+	glCompileShader(fs);
+	glGetShaderiv(fs, GL_COMPILE_STATUS, &status);
+	if (!status) { glDeleteShader(vs); glDeleteShader(fs); return false; }
+
+	water_prog = glCreateProgram();
+	if (!water_prog) { glDeleteShader(vs); glDeleteShader(fs); return false; }
+
+	glAttachShader(water_prog, vs);
+	glAttachShader(water_prog, fs);
+	glBindAttribLocation(water_prog, 0, "in_pos");
+	glBindAttribLocation(water_prog, 1, "in_col");
+	glBindAttribLocation(water_prog, 2, "in_uv");
+	glLinkProgram(water_prog);
+	glGetProgramiv(water_prog, GL_LINK_STATUS, &status);
+
+	glDetachShader(water_prog, vs);
+	glDetachShader(water_prog, fs);
+	glDeleteShader(vs);
+	glDeleteShader(fs);
+
+	if (!status) {
+		glDeleteProgram(water_prog);
+		water_prog = 0;
+		return false;
+	}
+
+	water_loc_mvp  = glGetUniformLocation(water_prog, "mvp");
+	water_loc_tex  = glGetUniformLocation(water_prog, "texImage");
+	water_loc_refl = glGetUniformLocation(water_prog, "reflTex");
+	water_loc_view = glGetUniformLocation(water_prog, "water_view");
+	water_loc_proj = glGetUniformLocation(water_prog, "water_proj");
+	return true;
+}
+
+/* Creates/recreates the reflection FBO to match the current window size (at half resolution) */
+static cc_bool SetupReflFBO(void) {
+	GLenum status;
+	int w, h;
+
+	if (!glGenFramebuffers) return false; /* FBOs not loaded */
+
+	w = max(1, WindowInfo.Width  / 2);
+	h = max(1, WindowInfo.Height / 2);
+
+	/* Destroy existing if size changed */
+	if (refl_fbo) {
+		glDeleteFramebuffers(1, &refl_fbo);  refl_fbo = 0;
+		glDeleteTextures(1, &refl_tex);       refl_tex = 0;
+		glDeleteRenderbuffers(1, &refl_rb);   refl_rb  = 0;
+	}
+	refl_w = w; refl_h = h;
+
+	/* Create color texture */
+	glGenTextures(1, &refl_tex);
+	glBindTexture(GL_TEXTURE_2D, refl_tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+	/* Create depth renderbuffer */
+	glGenRenderbuffers(1, &refl_rb);
+	glBindRenderbuffer(GL_RENDERBUFFER, refl_rb);
+	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, w, h);
+
+	/* Create and assemble FBO */
+	glGenFramebuffers(1, &refl_fbo);
+	glBindFramebuffer(GL_FRAMEBUFFER, refl_fbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, refl_tex, 0);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, refl_rb);
+
+	status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	if (status != GL_FRAMEBUFFER_COMPLETE) {
+		Platform_LogConst("Water reflection: FBO incomplete");
+		glDeleteFramebuffers(1, &refl_fbo);  refl_fbo = 0;
+		glDeleteTextures(1, &refl_tex);       refl_tex = 0;
+		glDeleteRenderbuffers(1, &refl_rb);   refl_rb  = 0;
+		return false;
+	}
+	return true;
+}
+
+cc_bool Gfx_BeginReflectionPass(float waterY, struct Matrix* out_refl_mvp) {
+	struct Matrix M_reflect, V_refl;
+
+	/* Lazy init: compile shader and create FBO on first use */
+	if (!refl_available) {
+		if (!water_prog && !CompileWaterShader()) {
+			Platform_LogConst("Water reflections: shader compilation failed");
+			return false;
+		}
+		if (!SetupReflFBO()) {
+			Platform_LogConst("Water reflections: FBO setup failed (GPU may not support framebuffer objects)");
+			return false;
+		}
+		refl_available = true;
+		Platform_LogConst("Water reflections: initialised OK");
+	}
+
+	/* Recreate FBO if window size changed */
+	if (refl_w != WindowInfo.Width / 2 || refl_h != WindowInfo.Height / 2) {
+		if (!SetupReflFBO()) { refl_available = false; return false; }
+	}
+
+	/* Build reflection matrix for plane y = waterY (row-vector convention) */
+	M_reflect = Matrix_Identity;
+	M_reflect.row2.y = -1.0f;
+	M_reflect.row4.y = 2.0f * waterY;
+
+	/* Reflected view (row-vector): V_refl = M_reflect * _view               */
+	/* p_clip = p_world * V_refl * P = p_world * M_reflect * _view * P      */
+	refl_saved_view = _view;
+	Matrix_Mul(&V_refl, &M_reflect, &_view);
+
+	/* Enable world-space clip plane at waterY so reflected camera */
+	/* doesn't render geometry below the water surface              */
+	gfx_refl_clipY = waterY;
+	DirtyUniform(UNI_CLIP_Y);
+
+	/* Compute reflected MVP for output (caller uses it for frustum culling) */
+	Matrix_Mul(out_refl_mvp, &V_refl, &_proj);
+
+	/* Bind FBO and set half-resolution viewport */
+	glBindFramebuffer(GL_FRAMEBUFFER, refl_fbo);
+	glViewport(0, 0, refl_w, refl_h);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+	/* Flip winding so culled faces render correctly in reflected space */
+	glFrontFace(GL_CW);
+
+	/* Load the reflected view matrix into the rendering pipeline */
+	Gfx_LoadMatrix(MATRIX_VIEW, &V_refl);
+	return true;
+}
+
+void Gfx_EndReflectionPass(void) {
+	/* Restore normal rendering state */
+	glFrontFace(GL_CCW);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glViewport(0, 0, WindowInfo.Width, WindowInfo.Height);
+
+	/* Disable world-space clip plane */
+	gfx_refl_clipY = -1e10f;
+	DirtyUniform(UNI_CLIP_Y);
+
+	/* Restore original view matrix */
+	Gfx_LoadMatrix(MATRIX_VIEW, &refl_saved_view);
+}
+
+void Gfx_BeginWaterRender(void) {
+	if (!refl_available) return;
+	gfx_waterMode = true;
+
+	/* Switch to water shader */
+	glUseProgram(water_prog);
+	gfx_activeShader = NULL; /* prevent ReloadUniforms touching wrong program */
+
+	/* Bind reflection texture to unit 1 */
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, refl_tex);
+	glActiveTexture(GL_TEXTURE0);
+
+	/* Set all water shader uniforms */
+	glUniformMatrix4fv(water_loc_mvp,  1, false, (float*)&_mvp);
+	glUniformMatrix4fv(water_loc_view, 1, false, (float*)&_view);
+	glUniformMatrix4fv(water_loc_proj, 1, false, (float*)&_proj);
+	glUniform1i(water_loc_tex,  0);
+	glUniform1i(water_loc_refl, 1);
+}
+
+void Gfx_EndWaterRender(void) {
+	if (!refl_available) return;
+	gfx_waterMode = false;
+
+	/* Unbind reflection texture from unit 1 */
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glActiveTexture(GL_TEXTURE0);
+
+	/* Restore normal shader selection */
+	gfx_activeShader = NULL;
+	SwitchProgram();
+}
+
+/* Free reflection resources on context loss */
+static void FreeReflectionResources(void) {
+	if (refl_fbo) { glDeleteFramebuffers(1, &refl_fbo);  refl_fbo = 0; }
+	if (refl_tex) { glDeleteTextures(1, &refl_tex);       refl_tex = 0; }
+	if (refl_rb)  { glDeleteRenderbuffers(1, &refl_rb);   refl_rb  = 0; }
+	if (water_prog) { glDeleteProgram(water_prog); water_prog = 0; }
+	refl_available = false;
+	gfx_waterMode  = false;
+}
+
 #endif

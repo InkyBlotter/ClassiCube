@@ -13,6 +13,26 @@
 #include "Options.h"
 #include "Queue.h"
 
+
+static int* blockers;
+
+/* Sun direction for angled shadows.
+   0=NE (+x+z), 1=NW (-x+z), 2=SW (-x-z), 3=SE (+x-z)
+   dx/dz are +1 or -1; effective coords mirror world coords when negative. */
+static int    sun_dir   = 0;
+static int    sun_dx    = 1;
+static int    sun_dz    = 1;
+static cc_bool sun_cycle = false;
+static float   sun_cycle_timer = 0.0f;
+#define SUN_CYCLE_PERIOD 20.0f
+
+static const int sun_dx_table[4] = {  1, -1, -1,  1 };
+static const int sun_dz_table[4] = {  1,  1, -1, -1 };
+
+/* Convert world x/z to "effective" shadow coordinates (mirrors when sun_dx/dz is negative) */
+#define SHADOW_EFFX(x) ((sun_dx > 0) ? (x) : (World.Width  - 1 - (x)))
+#define SHADOW_EFFZ(z) ((sun_dz > 0) ? (z) : (World.Length - 1 - (z)))
+
 struct LightNode {
 	IVec3 coords; /* 12 bytes */
 	cc_uint8 brightness; /* 1 byte */
@@ -99,7 +119,21 @@ static void FreePalettes(void) {
 		Mem_Free(palettes[i]);
 	}
 }
+static void CalcAngledShadows(int xStart, int zStart, int xWidth, int zLength);
+static void AllocState_Smooth(void);
+static void FreeState_Smooth(void);
+static void OnBlockChanged_Smooth(int x, int z);
+static void AllocState_Angled(void) {
+	int i, count;
+	if (Lighting_Mode != LIGHTING_MODE_ANGLED) return;
 
+	count = (World.Width + World.Height) * (World.Length + World.Height);
+	blockers = (int*)Mem_Alloc(count, sizeof(int), "angled lighting heightmap");
+	/* Seed with EdgeHeight: diagonals that never find a blocker still shadow blocks below water */
+	for (i = 0; i < count; i++) blockers[i] = Env.EdgeHeight;
+
+	CalcAngledShadows(0, 0, World.Width, World.Length);
+}
 static int chunksCount;
 static void AllocState(void) {
 	ClassicLighting_AllocState();
@@ -110,8 +144,311 @@ static void AllocState(void) {
 	chunkLightingData = (LightingChunk*)Mem_AllocCleared(chunksCount, sizeof(LightingChunk), "light chunks");
 	Queue_Init(&lightQueue, sizeof(struct LightNode));
 	Queue_Init(&unlightQueue, sizeof(struct LightNode));
+
+	AllocState_Angled();
+	AllocState_Smooth();
 }
 
+static void CalcAngledShadows_Old(int xStart, int zStart, int xWidth, int zLength) {
+	//xStart and zStart are zero.
+
+	int width = World.Width;
+	int height = World.Height;
+	int length = World.Length;
+
+	xStart += height;
+	if (xWidth == width) { //Since xWidth starts the same as width, this always happens at first
+		xWidth += height;
+		xStart -= height;
+	}
+
+	zStart += height;
+	if (zLength == length) {
+		zLength += height;
+		zStart -= height;
+	}
+
+	//the size of the lightmap in each dimension
+	int xExtent = width + height;
+	int zExtent = length + height;
+
+	int x, z;
+	for (x = xStart; x < xStart + xWidth; ++x) {
+		for (z = zStart; z < zStart + zLength; ++z) {
+
+			int y = height - 1; //-1 because it starts at 0
+			int xD = x + height - 1;
+			int zD = z + height - 1;
+
+			{
+				int xOver = 0; //how far past the edge of the map is it?
+				int zOver = 0;
+				if (xD >= xExtent) xOver = xD - (xExtent - 1);
+				if (zD >= zExtent) zOver = zD - (zExtent - 1);
+
+				int maxOver = max(xOver, zOver);
+				//pushing y and x and z back to the edge of the map
+				y -= maxOver;
+				xD -= maxOver;
+				zD -= maxOver;
+
+				xD -= height;
+				zD -= height;
+			}
+
+
+			//y x and z safe are used to create shadow columns that are thicker than the single block that casts them
+			int ySafe, xSafe, zSafe;
+
+			ySafe = (y > 0) ? y - 1 : y;
+			xSafe = (xD > 0) ? xD - 1 : xD;
+			zSafe = (zD > 0) ? zD - 1 : zD;
+
+			while (
+				y > 0 &&
+				xD >= 0 && xD < width &&
+				zD >= 0 && zD < length &&
+				!(
+					Blocks.BlocksLight[World_GetBlock(xD, y, zD)] ||
+					Blocks.BlocksLight[World_GetBlock(xD, ySafe, zD)]
+					)
+				&&
+				!(Blocks.BlocksLight[World_GetBlock(xSafe, y, zD)] || Blocks.BlocksLight[World_GetBlock(xD, y, zSafe)]) &&
+				!(Blocks.BlocksLight[World_GetBlock(xSafe, ySafe, zD)] || Blocks.BlocksLight[World_GetBlock(xD, ySafe, zSafe)])
+				) {
+
+				--y;
+				--xD;
+				--zD;
+
+				ySafe = (y > 0) ? y - 1 : y;
+				xSafe = (xD > 0) ? xD - 1 : xD;
+				zSafe = (zD > 0) ? zD - 1 : zD;
+			}
+
+			/* No blocker found — leave seed value (EdgeHeight) intact */
+			if (xD < 0 || zD < 0 || y == 0) continue;
+
+
+			blockers[x + z * xExtent] = y;
+		}
+	}
+}
+
+static void CalcAngledShadows(int xStart, int zStart, int xWidth, int zLength) {
+    //xStart and zStart are zero.
+    
+    int width  = World.Width;
+    int height = World.Height;
+    int length = World.Length;
+
+    xStart += height;
+    if (xWidth == width) { //this always happens when calculating shadows for the entire level
+        xWidth += height;
+        xStart -= height;
+    }
+            
+    zStart += height;
+    if (zLength == length) {
+        zLength += height;
+        zStart  -= height;
+    }
+
+    //the size of the lightmap in each dimension
+    int xExtent =  width + height;
+    int zExtent = length + height;
+    
+    int x, z;
+    for (x = xStart; x < xStart + xWidth; ++x) {
+        for (z = zStart; z < zStart + zLength; ++z) {
+
+            int y  =     height -1; //-1 because it starts at 0
+            int xD = x + height -1;
+            int zD = z + height -1;
+            
+            {
+                int xOver = 0; //how far past the edge of the map is it?
+                int zOver = 0;
+                if (xD >= xExtent) xOver = xD - (xExtent - 1);
+                if (zD >= zExtent) zOver = zD - (zExtent - 1);
+
+                int maxOver = max(xOver, zOver);
+                //pushing y and x and z back to the edge of the map
+                y  -= maxOver;
+                xD -= maxOver;
+                zD -= maxOver;
+
+                xD -= height;
+                zD -= height;
+            }
+            
+
+            //y x and z safe are used to create shadow columns that are thicker than the single block that casts them
+            int ySafe, xSafe, zSafe;
+
+            ySafe = (y  > 0) ? y  - 1 : y;
+            xSafe = (xD > 0) ? xD - 1 : xD;
+            zSafe = (zD > 0) ? zD - 1 : zD;
+
+            /* Convert effective coords to world coords for block lookups */
+            int wx     = SHADOW_EFFX(xD);
+            int wz     = SHADOW_EFFZ(zD);
+            int wxSafe = SHADOW_EFFX(xSafe);
+            int wzSafe = SHADOW_EFFZ(zSafe);
+
+            while (
+
+                y > 0 &&
+                xD >= 0 && xD < width &&
+                zD >= 0 && zD < length
+				&&
+                !(
+                    Blocks.BlocksLight[World_GetBlock(wx, y    , wz)] ||
+                    Blocks.BlocksLight[World_GetBlock(wx, ySafe, wz)]
+                 )
+                &&
+                !(
+					Blocks.BlocksLight[World_GetBlock(wxSafe, y    , wz)] ||
+					Blocks.BlocksLight[World_GetBlock(wx, y    , wzSafe)]
+				)
+				&&
+                !(
+					Blocks.BlocksLight[World_GetBlock(wxSafe, ySafe, wz)] ||
+					Blocks.BlocksLight[World_GetBlock(wx, ySafe, wzSafe)]
+				)
+
+                ) {
+
+                --y;
+                --xD;
+                --zD;
+
+                ySafe = (y  > 0) ? y  - 1 : y;
+                xSafe = (xD > 0) ? xD - 1 : xD;
+                zSafe = (zD > 0) ? zD - 1 : zD;
+
+                wx     = SHADOW_EFFX(xD);
+                wz     = SHADOW_EFFZ(zD);
+                wxSafe = SHADOW_EFFX(xSafe);
+                wzSafe = SHADOW_EFFZ(zSafe);
+            }
+
+            /* No blocker found — leave seed value (EdgeHeight) intact */
+            if (xD < 0 || zD < 0 || y == 0) continue;
+
+
+            blockers[x + z * xExtent] = y;
+        }
+    }
+}
+
+static void FreeState_Angled(void) {
+	if (Lighting_Mode != LIGHTING_MODE_ANGLED) return;
+
+	Mem_Free(blockers);
+}
+
+/* Recalculates a single entry in the angled shadow map at shadow coordinates (sx, sz). */
+static void CalcAngledShadows_Entry(int sx, int sz) {
+	int width   = World.Width;
+	int height  = World.Height;
+	int length  = World.Length;
+	int xExtent = width  + height;
+	int zExtent = length + height;
+	int y, xD, zD, ySafe, xSafe, zSafe, xOver, zOver, maxOver;
+
+	if (sx < 0 || sx >= xExtent || sz < 0 || sz >= zExtent) return;
+
+	y  = height - 1;
+	xD = sx + height - 1;
+	zD = sz + height - 1;
+
+	xOver = (xD >= xExtent) ? xD - (xExtent - 1) : 0;
+	zOver = (zD >= zExtent) ? zD - (zExtent - 1) : 0;
+	maxOver = max(xOver, zOver);
+	y  -= maxOver; xD -= maxOver; zD -= maxOver;
+	xD -= height;  zD -= height;
+
+	if (y <= 0 || xD < 0 || zD < 0) {
+		blockers[sx + sz * xExtent] = Env.EdgeHeight;
+		return;
+	}
+
+	ySafe = (y  > 0) ? y  - 1 : y;
+	xSafe = (xD > 0) ? xD - 1 : xD;
+	zSafe = (zD > 0) ? zD - 1 : zD;
+
+	{
+		int wx     = SHADOW_EFFX(xD);
+		int wz     = SHADOW_EFFZ(zD);
+		int wxSafe = SHADOW_EFFX(xSafe);
+		int wzSafe = SHADOW_EFFZ(zSafe);
+
+		while (
+			y > 0 && xD >= 0 && xD < width && zD >= 0 && zD < length &&
+			!(Blocks.BlocksLight[World_GetBlock(wx,     y,     wz    )] || Blocks.BlocksLight[World_GetBlock(wx,     ySafe, wz    )]) &&
+			!(Blocks.BlocksLight[World_GetBlock(wxSafe, y,     wz    )] || Blocks.BlocksLight[World_GetBlock(wx,     y,     wzSafe)]) &&
+			!(Blocks.BlocksLight[World_GetBlock(wxSafe, ySafe, wz    )] || Blocks.BlocksLight[World_GetBlock(wx,     ySafe, wzSafe)])
+		) {
+			--y; --xD; --zD;
+			ySafe = (y  > 0) ? y  - 1 : y;
+			xSafe = (xD > 0) ? xD - 1 : xD;
+			zSafe = (zD > 0) ? zD - 1 : zD;
+
+			wx     = SHADOW_EFFX(xD);
+			wz     = SHADOW_EFFZ(zD);
+			wxSafe = SHADOW_EFFX(xSafe);
+			wzSafe = SHADOW_EFFZ(zSafe);
+		}
+	}
+
+	blockers[sx + sz * xExtent] = (xD < 0 || zD < 0 || y == 0) ? Env.EdgeHeight : y;
+}
+
+/* Refreshes all unique chunks along diagonal (sx, sz) from y=fromY down to y=0. */
+static void RefreshAngledDiagonal(int sx, int sz, int fromY) {
+	int width  = World.Width;
+	int height = World.Height;
+	int length = World.Length;
+	/* At step k, the diagonal visits (sx-1-k, H-1-k, sz-1-k). At y=fromY: k=H-1-fromY. */
+	int k  = height - 1 - fromY;
+	int xD = sx - 1 - k;
+	int y  = fromY;
+	int zD = sz - 1 - k;
+	int lastCX = -2, lastCY = -2, lastCZ = -2;
+	int cx, cy, cz;
+
+	while (y >= 0 && xD >= 0 && xD < width && zD >= 0 && zD < length) {
+		int wx = SHADOW_EFFX(xD);
+		int wz = SHADOW_EFFZ(zD);
+		cx = wx >> CHUNK_SHIFT;
+		cy = y  >> CHUNK_SHIFT;
+		cz = wz >> CHUNK_SHIFT;
+		if (cx != lastCX || cy != lastCY || cz != lastCZ) {
+			MapRenderer_RefreshChunk(cx, cy, cz);
+			lastCX = cx; lastCY = cy; lastCZ = cz;
+		}
+		--y; --xD; --zD;
+	}
+}
+
+/* Updates the angled shadow map for a single block change and refreshes affected chunks. */
+static void OnBlockChanged_Angled(int bx, int by, int bz) {
+	/* Shadow map only changes if light-blocking status changed */
+	int ex  = SHADOW_EFFX(bx);
+	int ez  = SHADOW_EFFZ(bz);
+	int sx0 = ex + World.Height - by;
+	int sz0 = ez + World.Height - by;
+	int dx, dz;
+
+	for (dx = -1; dx <= 1; dx++) {
+		for (dz = -1; dz <= 1; dz++) {
+			int sx = sx0 + dx, sz = sz0 + dz;
+			CalcAngledShadows_Entry(sx, sz);
+			RefreshAngledDiagonal(sx, sz, by);
+		}
+	}
+}
 static void FreeState(void) {
 	int i;
 	ClassicLighting_FreeState();
@@ -131,6 +468,9 @@ static void FreeState(void) {
 	chunkLightingData = NULL;
 	Queue_Clear(&lightQueue);
 	Queue_Clear(&unlightQueue);
+
+	FreeState_Angled();
+	FreeState_Smooth();
 }
 
 /* Converts chunk x/y/z coordinates to the corresponding index in chunks array/list */
@@ -468,6 +808,15 @@ static void OnBlockChanged(int x, int y, int z, BlockID oldBlock, BlockID newBlo
 
 	CalcBlockChange(x, y, z, oldBlock, newBlock, false);
 	CalcBlockChange(x, y, z, oldBlock, newBlock, true);
+
+	if (Lighting_Mode == LIGHTING_MODE_ANGLED &&
+		Blocks.BlocksLight[oldBlock] != Blocks.BlocksLight[newBlock]) {
+		OnBlockChanged_Angled(x, y, z);
+	}
+	if (Lighting_Mode == LIGHTING_MODE_SMOOTH_ANGLED &&
+		Blocks.BlocksLight[oldBlock] != Blocks.BlocksLight[newBlock]) {
+		OnBlockChanged_Smooth(x, z);
+	}
 }
 /* Invalidates/Resets lighting state for all of the blocks in the world */
 /*  (e.g. because a block changed whether it is full bright or not) */
@@ -478,11 +827,317 @@ static void Refresh(void) {
 }
 static cc_bool IsLit(int x, int y, int z) { return ClassicLighting_IsLit(x, y, z); }
 static cc_bool IsLit_Fast(int x, int y, int z) { return ClassicLighting_IsLit_Fast(x, y, z); }
+static cc_bool IsLit_Angled(int x, int y, int z) {
+	int ex, ez;
+	if (!(x >= 0 && y >= 0 && z >= 0 && x < World.Width && y < World.Height && z < World.Length))
+		return 1; /* OOB = lit */
+
+	ex = SHADOW_EFFX(x);
+	ez = SHADOW_EFFZ(z);
+
+	/* The shadow map diagonal for any block at the far effective edge starts AT that
+	   block's own y, so blockers can never exceed y — IsLit would always be true.
+	   Nothing outside the map can cast a shadow here, so fall back to the global
+	   EdgeHeight baseline (same rule as classic lighting).
+	   For dx=+1, the far edge is ex==MaxX (world x==MaxX).
+	   For dx=-1, the far edge is ex==MaxX (world x==0). */
+	if (ex == World.MaxX || ez == World.MaxZ)
+		return y >= Env.EdgeHeight;
+
+	return y >= blockers[(ex + World.Height - y) + (ez + World.Height - y) * (World.Width + World.Height)];
+}
+static cc_bool IsLit_Fast_Angled(int x, int y, int z) {
+	return IsLit_Angled(x, y, z);
+}
+
+
+/*########################################################################################################################*
+*------------------------------------------------Fancier Angled (smooth) lighting-----------------------------------------*
+*#########################################################################################################################*/
+/* World-space float shadow heights [W * L]. A block at y is lit if (float)y >= smooth_h[x + z*W]. */
+static float* smooth_h      = NULL;
+/* Previous frame's shadow heights — used to diff which columns changed so we only
+   refresh the specific chunk slices that actually gained or lost shadow */
+static float* prev_smooth_h = NULL;
+/* Highest light-blocking point in each column: max(y + MaxBB.y) [W * L] */
+static float* smooth_col_top = NULL;
+
+static float   smooth_angle     = 45.0f;  /* Direction shadow points, degrees (0=+Z, 90=+X) */
+static float   smooth_elevation = 45.0f;  /* Sun elevation above horizon, degrees */
+static float   smooth_cycle_spd = 0.0f;  /* Rotation speed, degrees/sec. 0 = disabled */
+static cc_bool smooth_needs_update = false;
+
+/* Cached ray-march direction toward the sun (updated whenever angle/elevation change).
+   These are the X and Z displacements PER UNIT OF HEIGHT GAIN when marching toward the sun. */
+static float ray_dx_per_h = 0.0f;  /* -sin(angle) / tan(elevation) */
+static float ray_dz_per_h = 0.0f;  /* -cos(angle) / tan(elevation) */
+
+static void ComputeAllColumnTops(void) {
+	int x, y, z;
+	int W = World.Width;
+	int H = World.Height;
+	int L = World.Length;
+	for (z = 0; z < L; z++) {
+		for (x = 0; x < W; x++) {
+			float top = 0.0f;
+			for (y = 0; y < H; y++) {
+				BlockID block = World_GetBlock(x, y, z);
+				if (Blocks.BlocksLight[block]) {
+					float bt = (float)y + Blocks.MaxBB[block].y;
+					if (bt > top) top = bt;
+				}
+			}
+			smooth_col_top[x + z * W] = top;
+		}
+	}
+}
+
+static void CalcSmoothShadows(void) {
+	float angle_rad = smooth_angle * MATH_DEG2RAD;
+	float sdx       = Math_SinF(angle_rad);  /* Shadow X component */
+	float sdz       = Math_CosF(angle_rad);  /* Shadow Z component */
+	float elev_rad  = smooth_elevation * MATH_DEG2RAD;
+	float tan_elev  = Math_SinF(elev_rad) / Math_CosF(elev_rad);
+	float absSdx    = sdx < 0.0f ? -sdx : sdx;
+	float absSdz    = sdz < 0.0f ? -sdz : sdz;
+	int W = World.Width;
+	int L = World.Length;
+	int x, z;
+
+	/* Cache the per-height ray displacement toward the sun (light = -shadow direction).
+	   Guard against near-zero tan_elev (sun on horizon) to avoid division by zero. */
+	if (tan_elev > 0.001f) {
+		ray_dx_per_h = -sdx / tan_elev;
+		ray_dz_per_h = -sdz / tan_elev;
+	} else {
+		/* Sun nearly on the horizon: shadows extend to infinity horizontally.
+		   Use a very large step so the ray exits the map immediately. */
+		ray_dx_per_h = -sdx * 9999.0f;
+		ray_dz_per_h = -sdz * 9999.0f;
+	}
+
+	if (absSdx >= absSdz) {
+		/* X-dominant sweep. Step x in shadow direction; z drifts fractionally. */
+		int   dx_sign      = (sdx >= 0.0f) ? 1 : -1;
+		/* Per x-step in dx_sign direction: z advances by dz_per_step, y drops by drop_per_step */
+		float dz_per_step  = (sdz / sdx) * (float)dx_sign;
+		float drop_per_step = tan_elev / absSdx;
+		int x_start = (dx_sign > 0) ? 0    : W - 1;
+		int x_end   = (dx_sign > 0) ? W    : -1;
+
+		/* Seed the leading edge: no upstream shadow */
+		for (z = 0; z < L; z++)
+			smooth_h[x_start + z * W] = smooth_col_top[x_start + z * W];
+
+		for (x = x_start + dx_sign; x != x_end; x += dx_sign) {
+			int x_prev = x - dx_sign;
+			for (z = 0; z < L; z++) {
+				float z_f  = (float)z - dz_per_step;
+				int   z0   = Math_Floor(z_f);
+				float t    = z_f - (float)z0;
+				float h0   = (z0 >= 0 && z0     < L) ? smooth_h[x_prev + z0       * W] : 0.0f;
+				float h1   = (z0+1 >= 0 && z0+1 < L) ? smooth_h[x_prev + (z0 + 1) * W] : 0.0f;
+				float h_in = h0 * (1.0f - t) + h1 * t - drop_per_step;
+				float col  = smooth_col_top[x + z * W];
+				smooth_h[x + z * W] = h_in > col ? h_in : col;
+			}
+		}
+	} else {
+		/* Z-dominant sweep. Step z in shadow direction; x drifts fractionally. */
+		int   dz_sign      = (sdz >= 0.0f) ? 1 : -1;
+		float dx_per_step  = (sdx / sdz) * (float)dz_sign;
+		float drop_per_step = tan_elev / absSdz;
+		int z_start = (dz_sign > 0) ? 0    : L - 1;
+		int z_end   = (dz_sign > 0) ? L    : -1;
+
+		for (x = 0; x < W; x++)
+			smooth_h[x + z_start * W] = smooth_col_top[x + z_start * W];
+
+		for (z = z_start + dz_sign; z != z_end; z += dz_sign) {
+			int z_prev = z - dz_sign;
+			for (x = 0; x < W; x++) {
+				float x_f  = (float)x - dx_per_step;
+				int   x0   = Math_Floor(x_f);
+				float t    = x_f - (float)x0;
+				float h0   = (x0 >= 0 && x0     < W) ? smooth_h[x0       + z_prev * W] : 0.0f;
+				float h1   = (x0+1 >= 0 && x0+1 < W) ? smooth_h[(x0 + 1) + z_prev * W] : 0.0f;
+				float h_in = h0 * (1.0f - t) + h1 * t - drop_per_step;
+				float col  = smooth_col_top[x + z * W];
+				smooth_h[x + z * W] = h_in > col ? h_in : col;
+			}
+		}
+	}
+}
+
+/* Marches a ray from (x, height, z) toward the sun and returns true if any
+   light-blocking block is encountered — i.e. the point is genuinely in shadow.
+   smooth_h provides the upper bound so we stop early once we've cleared the
+   tallest possible caster.  Step size is 1 height unit; horizontal position is
+   advanced by the cached ray_dx/dz_per_h each step.
+   We start half a block above `height` so we never test the queried block itself. */
+static cc_bool ShadowRayBlocked(int x, float height, int z) {
+	float max_h = smooth_h[x + z * World.Width];
+	float ry    = height + 0.5f;
+	float rx    = (float)x + 0.5f + ray_dx_per_h * 0.5f;
+	float rz    = (float)z + 0.5f + ray_dz_per_h * 0.5f;
+	int   W     = World.Width;
+	int   H     = World.Height;
+	int   L     = World.Length;
+
+	while (ry < max_h && ry < (float)H) {
+		int bx = (int)rx, by = (int)ry, bz = (int)rz;
+		if ((unsigned)bx < (unsigned)W && (unsigned)bz < (unsigned)L &&
+			(unsigned)by < (unsigned)H) {
+			if (Blocks.BlocksLight[World_GetBlock(bx, by, bz)]) return 1;
+		}
+		rx += ray_dx_per_h;
+		rz += ray_dz_per_h;
+		ry += 1.0f;
+	}
+	return 0;
+}
+
+static cc_bool IsLit_Smooth(int x, int y, int z) {
+	if (!(x >= 0 && y >= 0 && z >= 0 && x < World.Width && y < World.Height && z < World.Length))
+		return 1;
+	if ((float)y >= smooth_h[x + z * World.Width]) return 1;
+	return !ShadowRayBlocked(x, (float)y, z);
+}
+
+static cc_bool IsLit_Smooth_AtHeight(int x, float height, int z) {
+	if (x < 0 || z < 0 || x >= World.Width || z >= World.Length) return 1;
+	if (height >= smooth_h[x + z * World.Width]) return 1;
+	return !ShadowRayBlocked(x, height, z);
+}
+
+static void AllocState_Smooth(void) {
+	int count;
+	if (Lighting_Mode != LIGHTING_MODE_SMOOTH_ANGLED) return;
+	count = World.Width * World.Length;
+	smooth_h      = (float*)Mem_TryAllocCleared(count, sizeof(float));
+	prev_smooth_h = (float*)Mem_TryAllocCleared(count, sizeof(float));
+	smooth_col_top = (float*)Mem_TryAllocCleared(count, sizeof(float));
+	if (!smooth_h || !prev_smooth_h || !smooth_col_top) { World_OutOfMemory(); return; }
+	smooth_needs_update = false;
+	ComputeAllColumnTops();
+	CalcSmoothShadows();
+	/* Seed prev so the first diff sees no change (everything was just built fresh) */
+	Mem_Copy(prev_smooth_h, smooth_h, count * sizeof(float));
+}
+
+static void FreeState_Smooth(void) {
+	if (!smooth_h) return;  /* Nothing to free */
+	Mem_Free(smooth_h);       smooth_h       = NULL;
+	Mem_Free(prev_smooth_h);  prev_smooth_h  = NULL;
+	Mem_Free(smooth_col_top); smooth_col_top = NULL;
+}
+
+static void OnBlockChanged_Smooth(int x, int z) {
+	float new_top = 0.0f;
+	int iy, W = World.Width, H = World.Height;
+	for (iy = 0; iy < H; iy++) {
+		BlockID block = World_GetBlock(x, iy, z);
+		if (Blocks.BlocksLight[block]) {
+			float bt = (float)iy + Blocks.MaxBB[block].y;
+			if (bt > new_top) new_top = bt;
+		}
+	}
+	smooth_col_top[x + z * W] = new_top;
+	smooth_needs_update = true;
+}
+
+/* Only refresh the chunk Y-slices where the shadow boundary actually moved.
+   Called after CalcSmoothShadows() with prev_smooth_h holding the previous result. */
+static void RefreshSmoothDirtyChunks(void) {
+	int x, z, cy, cx, cz, idx;
+	int W = World.Width;
+	int L = World.Length;
+
+	for (z = 0; z < L; z++) {
+		for (x = 0; x < W; x++) {
+			float old_h, new_h, diff, lo, hi;
+			int cy_lo, cy_hi;
+			idx   = x + z * W;
+			old_h = prev_smooth_h[idx];
+			new_h = smooth_h[idx];
+			diff  = new_h - old_h;
+			if (diff < 0.0f) diff = -diff;
+			/* Threshold: half a percent of one block. Catches every per-frame change
+			   from slow cycling while ignoring pure floating-point noise. */
+			if (diff < 0.005f) continue;
+
+			cx  = x >> CHUNK_SHIFT;
+			cz  = z >> CHUNK_SHIFT;
+			lo  = old_h < new_h ? old_h : new_h;
+			hi  = old_h > new_h ? old_h : new_h;
+			cy_lo = ((int)lo)     >> CHUNK_SHIFT;
+			cy_hi = ((int)hi + 1) >> CHUNK_SHIFT;
+			if (cy_lo < 0)               cy_lo = 0;
+			if (cy_hi >= World.ChunksY)  cy_hi = World.ChunksY - 1;
+			for (cy = cy_lo; cy <= cy_hi; cy++)
+				MapRenderer_RefreshChunk(cx, cy, cz);
+		}
+	}
+}
+
+static void FancyLighting_Tick_Smooth(float delta) {
+	cc_bool needs_recalc = smooth_needs_update;
+	if (!World.Loaded || !smooth_h) return;
+
+	if (smooth_cycle_spd != 0.0f) {
+		smooth_angle += smooth_cycle_spd * delta;
+		while (smooth_angle >= 360.0f) smooth_angle -= 360.0f;
+		while (smooth_angle <    0.0f) smooth_angle += 360.0f;
+		needs_recalc = true;
+	}
+
+	if (!needs_recalc) return;
+	smooth_needs_update = false;
+
+	/* Snapshot current state, recompute, then refresh only columns that changed */
+	Mem_Copy(prev_smooth_h, smooth_h, World.Width * World.Length * sizeof(float));
+	CalcSmoothShadows();
+	RefreshSmoothDirtyChunks();
+}
+
+float FancyLighting_GetSmoothAngle(void)        { return smooth_angle; }
+void  FancyLighting_SetSmoothAngle(float angle) {
+	smooth_angle = angle;
+	while (smooth_angle >= 360.0f) smooth_angle -= 360.0f;
+	while (smooth_angle <    0.0f) smooth_angle += 360.0f;
+	Options_SetInt(OPT_SMOOTH_ANGLE, (int)smooth_angle);
+	if (Lighting_Mode == LIGHTING_MODE_SMOOTH_ANGLED && World.Loaded && smooth_h) {
+		Mem_Copy(prev_smooth_h, smooth_h, World.Width * World.Length * sizeof(float));
+		CalcSmoothShadows();
+		RefreshSmoothDirtyChunks();
+	}
+}
+
+float FancyLighting_GetSmoothElevation(void)       { return smooth_elevation; }
+void  FancyLighting_SetSmoothElevation(float elev) {
+	if (elev < 1.0f)  elev = 1.0f;
+	if (elev > 89.0f) elev = 89.0f;
+	smooth_elevation = elev;
+	Options_SetInt(OPT_SMOOTH_ELEV, (int)smooth_elevation);
+	if (Lighting_Mode == LIGHTING_MODE_SMOOTH_ANGLED && World.Loaded && smooth_h) {
+		Mem_Copy(prev_smooth_h, smooth_h, World.Width * World.Length * sizeof(float));
+		CalcSmoothShadows();
+		RefreshSmoothDirtyChunks();
+	}
+}
+
+float FancyLighting_GetSmoothCycleSpeed(void)      { return smooth_cycle_spd; }
+void  FancyLighting_SetSmoothCycleSpeed(float spd) {
+	smooth_cycle_spd = spd;
+	Options_SetInt(OPT_SMOOTH_CYCLE_SPD, (int)smooth_cycle_spd);
+}
 
 #define CalcForChunkIfNeeded(cx, cy, cz, chunkIndex) \
 	if (chunkLightingDataFlags[chunkIndex] < CHUNK_ALL_CALCULATED) { \
 		CalculateChunkLightingAll(chunkIndex, cx, cy, cz); \
 	}
+
+
 
 static PackedCol Color_Core(int x, int y, int z, int paletteFace) {
 	cc_uint8 lightData;
@@ -505,9 +1160,32 @@ static PackedCol Color_Core(int x, int y, int z, int paletteFace) {
 	}
 
 	/* This cell is exposed to sunlight */
-	if (y > ClassicLighting_GetLightHeight(x, z)) {
+	if (Lighting.IsLit_Fast(x, y, z)) {
 		/* Push the pointer forward into the sun lit palette section */
 		paletteFace += PALETTE_SHADES;
+	}
+
+	return palettes[paletteFace][lightData];
+}
+static PackedCol Color_Core_Always_Shadowed(int x, int y, int z, int paletteFace) {
+	cc_uint8 lightData;
+	int cx, cy, cz, chunkIndex;
+	int chunkCoordsIndex;
+
+	cx = x >> CHUNK_SHIFT;
+	cy = y >> CHUNK_SHIFT;
+	cz = z >> CHUNK_SHIFT;
+
+	chunkIndex = ChunkCoordsToIndex(cx, cy, cz);
+	CalcForChunkIfNeeded(cx, cy, cz, chunkIndex);
+
+	/* There might be no light data in this chunk even after it was calculated */
+	if (chunkLightingData[chunkIndex] == NULL) {
+		lightData = 0;
+	}
+	else {
+		chunkCoordsIndex = GlobalCoordsToChunkCoordsIndex(x, y, z);
+		lightData = chunkLightingData[chunkIndex][chunkCoordsIndex];
 	}
 
 	return palettes[paletteFace][lightData];
@@ -549,19 +1227,71 @@ static void LightHint(int startX, int startY, int startZ) {
 	CalcForChunkIfNeeded(cx, cy, cz, chunkIndex);
 }
 
+int FancyLighting_GetSunDir(void) { return sun_dir; }
+
+void FancyLighting_SetSunDir(int dir) {
+	dir = dir & 3;
+	sun_dir = dir;
+	sun_dx  = sun_dx_table[dir];
+	sun_dz  = sun_dz_table[dir];
+	Options_SetInt(OPT_SUN_DIR, dir);
+
+	if (Lighting_Mode == LIGHTING_MODE_ANGLED && World.Loaded && blockers) {
+		int i, count = (World.Width + World.Height) * (World.Length + World.Height);
+		for (i = 0; i < count; i++) blockers[i] = Env.EdgeHeight;
+		CalcAngledShadows(0, 0, World.Width, World.Length);
+		MapRenderer_Refresh();
+	}
+}
+
+cc_bool FancyLighting_GetSunCycle(void) { return sun_cycle; }
+
+void FancyLighting_SetSunCycle(cc_bool enabled) {
+	sun_cycle       = enabled;
+	sun_cycle_timer = 0.0f;
+	Options_SetBool(OPT_SUN_CYCLE, enabled);
+}
+
+static void FancyLighting_Tick(float delta) {
+	if (Lighting_Mode != LIGHTING_MODE_ANGLED) return;
+	if (!sun_cycle || !World.Loaded)           return;
+	sun_cycle_timer += delta;
+	if (sun_cycle_timer >= SUN_CYCLE_PERIOD) {
+		sun_cycle_timer -= SUN_CYCLE_PERIOD;
+		FancyLighting_SetSunDir((sun_dir + 1) & 3);
+	}
+}
+
 void FancyLighting_SetActive(void) {
 	Lighting.OnBlockChanged = OnBlockChanged;
 	Lighting.Refresh = Refresh;
-	Lighting.IsLit = IsLit;
 	Lighting.Color = Color;
 	Lighting.Color_XSide = Color_XSide;
 
-	Lighting.IsLit_Fast = IsLit_Fast;
-	Lighting.Color_Sprite_Fast = Color;
-	Lighting.Color_YMax_Fast   = Color;
-	Lighting.Color_YMin_Fast   = Color_YMinSide;
-	Lighting.Color_XSide_Fast  = Color_XSide;
-	Lighting.Color_ZSide_Fast  = Color_ZSide;
+	if (Lighting_Mode == LIGHTING_MODE_SMOOTH_ANGLED) {
+		Lighting.IsLit          = IsLit_Smooth;
+		Lighting.IsLit_Fast     = IsLit_Smooth;
+		Lighting.IsLit_AtHeight = IsLit_Smooth_AtHeight;
+		Lighting.Tick           = FancyLighting_Tick_Smooth;
+	} else if (Lighting_Mode == LIGHTING_MODE_ANGLED) {
+		Lighting.IsLit          = IsLit_Angled;
+		Lighting.IsLit_Fast     = IsLit_Fast_Angled;
+		Lighting.IsLit_AtHeight = NULL;
+		Lighting.Tick           = FancyLighting_Tick;
+	} else {
+		Lighting.IsLit          = IsLit;
+		Lighting.IsLit_Fast     = IsLit_Fast;
+		Lighting.IsLit_AtHeight = NULL;
+		Lighting.Tick           = FancyLighting_Tick;
+	}
+
+	Lighting.Color_Sprite_Fast   = Color;
+	Lighting.Color_YMax_Fast     = Color;
+	Lighting.Color_YMin_Fast     = Color_YMinSide;
+	Lighting.Color_XSide_Fast    = Color_XSide;
+	Lighting.Color_ZSide_Fast    = Color_ZSide;
+	Lighting.Color_XSideMin_Fast = Color_XSide;
+	Lighting.Color_ZSideMin_Fast = Color_ZSide;
 
 	Lighting.FreeState  = FreeState;
 	Lighting.AllocState = AllocState;
@@ -579,5 +1309,16 @@ static void OnEnvVariableChanged(void* obj, int envVar) {
 }
 
 void FancyLighting_OnInit(void) {
+	int dir;
 	Event_Register_(&WorldEvents.EnvVarChanged, NULL, OnEnvVariableChanged);
+	dir     = Options_GetInt(OPT_SUN_DIR, 0, 3, 0);
+	sun_dir = dir;
+	sun_dx  = sun_dx_table[dir];
+	sun_dz  = sun_dz_table[dir];
+	sun_cycle = Options_GetBool(OPT_SUN_CYCLE, false);
+
+	smooth_angle     = (float)Options_GetInt(OPT_SMOOTH_ANGLE,    0, 359, 45);
+	smooth_elevation = (float)Options_GetInt(OPT_SMOOTH_ELEV,     1,  89, 45);
+	smooth_cycle_spd = (float)Options_GetInt(OPT_SMOOTH_CYCLE_SPD, 0, 360,  0);
 }
+

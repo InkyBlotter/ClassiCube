@@ -478,6 +478,22 @@ void Gfx_RestoreAlphaState(cc_uint8 draw);
 
 
 /*########################################################################################################################*
+*----------------------------------------------------Water reflections----------------------------------------------------*
+*#########################################################################################################################*/
+/* Begins rendering the reflection pass for water reflections */
+/* Binds the reflection FBO, sets up reflected view/MVP, clears FBO */
+/* out_refl_mvp receives the reflected MVP for frustum culling */
+/* Returns false if reflections are unsupported or FBO creation failed */
+cc_bool Gfx_BeginReflectionPass(float waterY, struct Matrix* out_refl_mvp);
+/* Ends the reflection pass, restores normal rendering state */
+void Gfx_EndReflectionPass(void);
+/* Begins rendering water surfaces using the reflection texture */
+/* Must be called after Gfx_EndReflectionPass and before water draw calls */
+void Gfx_BeginWaterRender(void);
+/* Ends water rendering, restores the normal shader */
+void Gfx_EndWaterRender(void);
+
+/*########################################################################################################################*
 *------------------------------------------------------2D rendering------------------------------------------------------*
 *#########################################################################################################################*/
 /* Renders a 2D flat coloured rectangle */
