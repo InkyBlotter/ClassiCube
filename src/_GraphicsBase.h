@@ -72,6 +72,16 @@ void Gfx_SetColorWrite(cc_bool r, cc_bool g, cc_bool b, cc_bool a) {
 
 void Gfx_SetTexturing(cc_bool enabled) { } /* useless */
 
+/* Default stubs for backends that don't implement water reflections */
+#if CC_GFX_BACKEND != CC_GFX_BACKEND_GL2
+cc_bool Gfx_BeginReflectionPass(float waterY, struct Matrix* out_refl_mvp) {
+	(void)waterY; (void)out_refl_mvp; return false;
+}
+void Gfx_EndReflectionPass(void) { }
+void Gfx_BeginWaterRender(void)  { }
+void Gfx_EndWaterRender(void)    { }
+#endif
+
 #ifndef CC_BUILD_3DS
 void Gfx_Set3DLeft(struct Matrix* proj, struct Matrix* view) {
 	struct Matrix proj_left, view_left;

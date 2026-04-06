@@ -1,17 +1,17 @@
 #if defined CC_BUILD_WIN
-	/* Avoid pointless includes */
-	#define WIN32_LEAN_AND_MEAN
-	#define NOSERVICE
-	#define NOMCX
-	#define NOIME
-	#include <windows.h>
-	#define GLAPI WINGDIAPI
+/* Avoid pointless includes */
+#define WIN32_LEAN_AND_MEAN
+#define NOSERVICE
+#define NOMCX
+#define NOIME
+#include <windows.h>
+#define GLAPI WINGDIAPI
 #elif defined CC_BUILD_SYMBIAN && !defined __WINSCW__
-	#define GLAPI IMPORT_C
-	#define APIENTRY
+#define GLAPI IMPORT_C
+#define APIENTRY
 #else
-	#define GLAPI extern
-	#define APIENTRY
+#define GLAPI extern
+#define APIENTRY
 #endif
 
 typedef unsigned int GLenum;
@@ -110,3 +110,24 @@ typedef cc_uintptr GLpointer;
 #define GL_INFO_LOG_LENGTH       0x8B84
 
 #define GL_OUT_OF_MEMORY         0x0505
+
+/* Winding order constants (GL 1.0) */
+#define GL_CW                    0x0900
+#define GL_CCW                   0x0901
+
+/* Texture wrap constants */
+#define GL_TEXTURE_WRAP_S        0x2802
+#define GL_TEXTURE_WRAP_T        0x2803
+#define GL_CLAMP_TO_EDGE         0x812F
+
+/* Multi-texturing (GL 1.3) */
+#define GL_TEXTURE0              0x84C0
+#define GL_TEXTURE1              0x84C1
+
+/* Framebuffer Object (GL 3.0 / GL_ARB_framebuffer_object) */
+#define GL_FRAMEBUFFER           0x8D40
+#define GL_RENDERBUFFER          0x8D41
+#define GL_COLOR_ATTACHMENT0     0x8CE0
+#define GL_DEPTH_ATTACHMENT      0x8D00
+#define GL_DEPTH_COMPONENT16     0x81A5
+#define GL_FRAMEBUFFER_COMPLETE  0x8CD5

@@ -363,6 +363,9 @@
     <ClInclude Include="_AudioBase.h">
       <Filter>Header Files\Audio</Filter>
     </ClInclude>
+    <ClInclude Include="OrthoRender.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="String.c">
@@ -571,9 +574,6 @@
     </ClCompile>
     <ClCompile Include="Graphics_D3D9.c">
       <Filter>Source Files\Graphics</Filter>
-    </ClCompile>
-    <ClCompile Include="Http_Web.c">
-      <Filter>Source Files\Network</Filter>
     </ClCompile>
     <ClCompile Include="Http_Worker.c">
       <Filter>Source Files\Network</Filter>
@@ -991,6 +991,9 @@
     </ClCompile>
     <ClCompile Include="..\third_party\bearssl\x509_minimal_full.c">
       <Filter>Source Files\BearSSL</Filter>
+    </ClCompile>
+    <ClCompile Include="OrthoRender.c">
+      <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
